@@ -16,6 +16,19 @@ void npu_paged_attention(const at::Tensor& query,
                           const at::Tensor& context_lens,
                           at::Tensor& out);
 
+// Custom paged attention for ACL graph execution
+// This variant avoids .to(kCPU) operations that break ACL graph capture
+void npu_custom_paged_attention(const at::Tensor& query,
+                                 const at::Tensor& key_cache,
+                                 const at::Tensor& value_cache,
+                                 int64_t num_kv_heads,
+                                 int64_t num_heads,
+                                 double scale_value,
+                                 const at::Tensor& block_table,
+                                 const at::Tensor& context_lens,
+                                 const at::Tensor& tiling_data,
+                                 at::Tensor& out);
+
 void npu_reshape_and_cache(const at::Tensor& key,
                             const at::Tensor& value,
                             at::Tensor& key_cache,

@@ -28,6 +28,7 @@ cc_library(
     glog::glog
     torch
     torch_npu
+    atb_customize
 )
 
 target_include_directories(torch_npu_kernels PUBLIC
