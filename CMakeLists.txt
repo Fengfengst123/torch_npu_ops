@@ -15,6 +15,48 @@ set(TORCH_NPU_KERNELS_SOURCES
   ops_npu/paged_attention_atb.cpp
   ops_npu/reshape_and_cach_atb.cpp
   ops_npu/self_attention_atb.cpp
+  ops_npu/rope_atb.cpp
+)
+
+
+set(TRITON_NPU_API_SRCS
+  triton_npu/torch_api/npu_triton_rope_inplace.cpp
+)
+
+cc_library(
+  NAME
+    triton_adapter
+  HDRS
+    triton_npu/kernel_registry.h
+    triton_npu/operation_base.h
+    triton_npu/args_builder.h
+    triton_npu/operations.h
+    triton_npu/torch_api/operation_factory.h
+    triton_npu/torch_api/triton_ops_api.h
+  SRCS
+    triton_npu/kernel_registry.cpp
+    ${TRITON_NPU_API_SRCS}
+  DEPS
+    "$ENV{ASCEND_HOME_PATH}/lib64/libruntime.so"
+    ascendcl
+    nlohmann_json::nlohmann_json
+    glog::glog
+)
+
+if(DEFINED ENV{TRITON_BINARY_PATH} AND NOT "$ENV{TRITON_BINARY_PATH}" STREQUAL "")
+  set(TRITON_BIN_PATH "$ENV{TRITON_BINARY_PATH}")
+else()
+  set(TRITON_BIN_PATH "${CMAKE_CURRENT_SOURCE_DIR}/triton_npu/binary")
+endif()
+
+message(STATUS "TRITON_BINARY_PATH = ${TRITON_BIN_PATH}")
+
+target_compile_definitions(triton_adapter PRIVATE
+  TRITON_BINARY_PATH="${TRITON_BIN_PATH}"
+)
+
+target_include_directories(triton_adapter PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/triton_npu
 )
 
 cc_library(
@@ -31,6 +73,16 @@ cc_library(
     atb_customize
 )
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_custom_command(
+  TARGET triton_adapter POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E env
+  TRITON_BINARY_PATH=${TRITON_BIN_PATH}
+  ${Python3_EXECUTABLE} setup.py
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/triton_npu
+  COMMENT "Running triton_npu/setup.py to build/update Triton kernels."
+)
+
 target_include_directories(torch_npu_kernels PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -38,3 +90,5 @@ target_include_directories(torch_npu_kernels PUBLIC
 target_compile_definitions(torch_npu_kernels PRIVATE
   TORCH_NPU_KERNELS_VERSION="1.0.0"
 )
+
+add_subdirectory(triton_npu/test)
