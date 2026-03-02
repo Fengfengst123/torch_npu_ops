@@ -79,41 +79,49 @@ torch::Tensor rope_ref_cpu(
 
 class TritonRopeInplaceTest : public ::testing::TestWithParam<std::tuple<int64_t, int64_t>> {
  protected:
-  void SetUp() override {
+  static bool npu_initialized_;
+
+  static void SetUpTestSuite() {
     try {
       torch::zeros({1}, torch::TensorOptions().device("npu:0"));
-      tensor_options_ =
-          torch::TensorOptions().dtype(torch::kBFloat16).device("npu:0");
-      npu_available_ = true;
+      torch_npu::init_npu("npu:" + std::to_string(kDeviceId));
+      auto& reg = KernelRegistry::get_instance();
+      std::string binary_path =
+          GetKernelBinaryPath("rope_inplace_kernel.npubin");
+      npu_initialized_ =
+          reg.register_kernel("rope_inplace_kernel", binary_path) &&
+          reg.get_kernel_stub("rope_inplace_kernel") != nullptr;
     } catch (...) {
-      tensor_options_ =
-          torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU);
-      npu_available_ = false;
-      return;
+      npu_initialized_ = false;
     }
-
-    kernel_name_ = "rope_inplace_kernel";
-    binary_filename_ = "rope_inplace_kernel.npubin";
-
-    torch::manual_seed(42);
-    torch_npu::init_npu(device_str_);
-
-    binary_path_ = GetKernelBinaryPath(binary_filename_);
-    auto& reg = KernelRegistry::get_instance();
-    ASSERT_TRUE(reg.register_kernel(kernel_name_, binary_path_))
-        << "Failed to register kernel: " << kernel_name_ << " from " << binary_path_;
-    ASSERT_NE(reg.get_kernel_stub(kernel_name_), nullptr)
-        << "Failed to get kernel stub: " << kernel_name_;
   }
 
-  void TearDown() override {
-    if (npu_available_) {
+  static void TearDownTestSuite() {
+    if (npu_initialized_) {
       try {
+        KernelRegistry::get_instance().cleanup();
         torch_npu::finalize_npu();
       } catch (...) {
       }
     }
   }
+
+  void SetUp() override {
+    npu_available_ = npu_initialized_;
+    if (!npu_available_) {
+      tensor_options_ =
+          torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU);
+      return;
+    }
+    tensor_options_ =
+        torch::TensorOptions().dtype(torch::kBFloat16).device("npu:" + std::to_string(kDeviceId));
+    torch::manual_seed(42);
+    kernel_name_ = "rope_inplace_kernel";
+    binary_filename_ = "rope_inplace_kernel.npubin";
+    binary_path_ = GetKernelBinaryPath(binary_filename_);
+  }
+
+  void TearDown() override {}
 
   torch::TensorOptions tensor_options_;
   bool npu_available_ = false;
@@ -122,6 +130,8 @@ class TritonRopeInplaceTest : public ::testing::TestWithParam<std::tuple<int64_t
   std::string kernel_name_;
   std::string binary_path_;
 };
+
+bool TritonRopeInplaceTest::npu_initialized_ = false;
 
 TEST_P(TritonRopeInplaceTest, RopeInplaceKernelTest) {
   if (!npu_available_) {
@@ -168,6 +178,12 @@ INSTANTIATE_TEST_SUITE_P(
     RopeInplaceParams,
     TritonRopeInplaceTest,
     ::testing::Values(
+        std::make_tuple(1, 8),
+        std::make_tuple(4, 8),
+        std::make_tuple(8, 8),
+        std::make_tuple(1, 1),
+        std::make_tuple(4, 1),
+        std::make_tuple(8, 1),
         std::make_tuple(16, 8)));
 
 }  // namespace xllm::kernel::npu
@@ -195,4 +211,5 @@ int main(int argc, char** argv) {
   int result = RUN_ALL_TESTS();
   return result;
 }
+
 

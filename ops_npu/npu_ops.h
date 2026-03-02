@@ -45,4 +45,11 @@ void npu_flash_attention(const at::Tensor& query,
                           const int64_t num_kv_heads,
                           at::Tensor& out);
 
+void npu_rotary_embedding(const at::Tensor &positions,
+                          at::Tensor &query,
+			              at::Tensor &key,
+                          int64_t head_size,
+                          const at::Tensor &cos_sin_cache,
+                          bool is_neox_style);
+
 }  // namespace atb

@@ -27,6 +27,27 @@ class RopeInplaceOp final : public OperationBase {
   RopeInplaceOp() : OperationBase("rope_inplace_kernel") {}
 };
 
+class FusedGdnGatingOp final : public OperationBase {
+ public:
+  FusedGdnGatingOp() : OperationBase("fused_gdn_gating_head8_kernel") {}
+};
+
+class LayerNormFwdOp final : public OperationBase {
+ public:
+  LayerNormFwdOp() : OperationBase("layer_norm_fwd_kernel") {}
+};
+
+class RecurrentGatedDeltaRuleFwdOp final : public OperationBase {
+ public:
+  RecurrentGatedDeltaRuleFwdOp() : OperationBase("fused_recurrent_gated_delta_rule_fwd_kernel") {}
+};
+
+class CausalConv1dUpdateNoCacheNoMtpOp final : public OperationBase {
+ public:
+  CausalConv1dUpdateNoCacheNoMtpOp()
+      : OperationBase("_causal_conv1d_update_kernel_no_cache_len_no_mtp") {}
+};
+
 }  // namespace xllm::kernel::npu
 
 
