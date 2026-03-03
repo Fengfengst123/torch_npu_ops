@@ -118,7 +118,7 @@ torch::Tensor layer_norm_fwd(
                        out_tensorPtr,
                        weightPtr,
                        z_2dPtr,
-                       meanPtr,
+                       // meanPtr, in qwen3-next this input won't be needed.
                        rstdPtr,
                        stride_x_row,
                        stride_y_row,

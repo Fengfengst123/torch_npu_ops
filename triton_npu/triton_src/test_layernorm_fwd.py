@@ -307,7 +307,7 @@ def test_custom_layer_norm():
         # (2, 8, 128, True, False, True, False, None),     
         # (2, 8, 128, True, True, True, False, None),      
         # (2, 8, 128, True, True, False, False, None),    
-        (2, 8, 128, False, True, True, False, None),     
+        (2, 8, 128, False, True, True, True, None),     
         # (2, 8, 128, True, True, True, False, 128),     
         # (4, 16, 256, True, False, True, False, 64),     
         # (1, 4, 64, False, True, False, True, 32),    

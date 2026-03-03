@@ -186,9 +186,9 @@ TEST_F(TritonLayerNormFwdTest, KernelTest2) {
     auto z = torch::randn({batch_size, seq_len, hidden_dim}, tensor_options);
     std::optional<torch::Tensor> z_optional = z;
 
-    auto output_golden = layer_norm_golden_cpu(x, weight, bias, eps, z_optional, group_size, true, false);
+    auto output_golden = layer_norm_golden_cpu(x, weight, bias, eps, z_optional, group_size, true, true);
     auto npu_stream = c10_npu::getCurrentNPUStream(0);
-    auto output = xllm::kernel::npu::layer_norm_fwd(x, weight, bias, eps, z_optional, group_size, true, false);
+    auto output = xllm::kernel::npu::layer_norm_fwd(x, weight, bias, eps, z_optional, group_size, true, true);
     aclrtSynchronizeStream(npu_stream.stream());
 
     auto output_golden_cpu = output_golden.cpu().contiguous();
