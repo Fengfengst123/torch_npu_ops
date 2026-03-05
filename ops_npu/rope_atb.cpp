@@ -45,7 +45,7 @@ namespace atb {
 
         if (!sequenceLength.defined() || previousTokenCount != currentTokenCount) {
             previousTokenCount = currentTokenCount;
-            sequenceLength = at::tensor({currentTokenCount}, at::kInt).to(query.device());
+            sequenceLength = at::full({1}, currentTokenCount, at::TensorOptions().device(query.device()).dtype(at::kInt));
         }
 
         RopeParam ropeparam;
