@@ -33,6 +33,9 @@ torch::Tensor npu_causal_conv1d_update(
     const std::optional<torch::Tensor>& intermediate_conv_window,
     int32_t pad_slot_id,
     bool validate_data) {
+    (void)max_query_len;
+    (void)validate_data;
+
     if (query_start_loc.has_value()) {
         LOG(ERROR) << "Current op does not support non-empty values for query_start_loc.";
         return torch::zeros(1);
@@ -43,16 +46,54 @@ torch::Tensor npu_causal_conv1d_update(
     }
     torch::Tensor out = torch::empty(
         x.sizes(), torch::TensorOptions().dtype(x.dtype()).device(x.device()));
-    int32_t batch, dim, seqlen, width, num_cache_lines, state_len = 0;
-    batch = x.size(0);
-    dim = x.size(1);
-    seqlen = x.size(2);
-    width = weight.size(1);
-    num_cache_lines = conv_state.size(0);
-    state_len = conv_state.size(1);
+    int32_t batch = x.size(0);
+    int32_t dim = x.size(1);
+    int32_t seqlen = x.size(2);
+    int32_t width = weight.size(1);
+    int32_t state_len = conv_state.size(2);
 
     auto npu_stream = c10_npu::getCurrentNPUStream();
     rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
+
+    const bool use_qwen_decode_kernel =
+        !bias.has_value() && x.dim() == 3 && conv_state.dim() == 3 &&
+        weight.dim() == 2 && x.size(1) == conv_state.size(1) &&
+        x.size(1) == weight.size(0) && seqlen == 1 && width == 4 &&
+        state_len == 3;
+    if (use_qwen_decode_kernel) {
+        auto x_contiguous = x.contiguous();
+        auto state_contiguous = conv_state.contiguous();
+        auto weight_contiguous = weight.contiguous();
+
+        void* x_ptr = x_contiguous.data_ptr();
+        void* conv_state_ptr = state_contiguous.data_ptr();
+        void* weight_ptr = weight_contiguous.data_ptr();
+        void* conv_state_indices_ptr = conv_state_indices.has_value()
+            ? conv_state_indices.value().data_ptr()
+            : nullptr;
+        void* out_ptr = out.data_ptr();
+
+        int32_t gridX = batch;
+        int32_t gridY = (dim + 255) / 256;
+        int32_t gridZ = 1;
+        auto& op = OperationFactory::instance().causal_conv1d_update_qwen_decode();
+        rtError_t ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+            ab.constructArgs(x_ptr,
+                             conv_state_ptr,
+                             weight_ptr,
+                             conv_state_indices_ptr,
+                             out_ptr,
+                             pad_slot_id,
+                             batch,
+                             dim);
+        });
+        if (ret != RT_ERROR_NONE) {
+            LOG(ERROR) << "rtKernelLaunch failed for '_causal_conv1d_update_qwen_decode_kernel': " << ret;
+            return unsqueeze ? out.squeeze(-1) : out;
+        }
+        conv_state.copy_(state_contiguous);
+        return unsqueeze ? out.squeeze(-1) : out;
+    }
 
     void* x_ptr = x.data_ptr();
     void* conv_state_ptr = conv_state.data_ptr();

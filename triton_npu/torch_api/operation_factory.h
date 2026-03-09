@@ -52,6 +52,10 @@ class OperationFactory final {
     return get_or_create<CausalConv1dUpdateNoCacheNoMtpOp>("_causal_conv1d_update_kernel_no_cache_len_no_mtp");
   }
 
+  CausalConv1dUpdateQwenDecodeOp& causal_conv1d_update_qwen_decode() {
+    return get_or_create<CausalConv1dUpdateQwenDecodeOp>("_causal_conv1d_update_qwen_decode_kernel");
+  }
+
  private:
   OperationFactory() = default;
 

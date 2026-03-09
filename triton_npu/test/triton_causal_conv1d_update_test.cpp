@@ -153,8 +153,8 @@ class TritonCausalConv1dUpdateTest : public ::testing::Test {
 
     torch::manual_seed(42);
     torch_npu::init_npu(device_str_);
-    kernel_name_ = "_causal_conv1d_update_kernel_no_cache_len_no_mtp";
-    binary_filename_ = "_causal_conv1d_update_kernel_no_cache_len_no_mtp.npubin";
+    kernel_name_ = "_causal_conv1d_update_qwen_decode_kernel";
+    binary_filename_ = "_causal_conv1d_update_qwen_decode_kernel.npubin";
     binary_path_ = GetKernelBinaryPath(binary_filename_);
     auto& reg = KernelRegistry::get_instance();
     (void)reg.register_kernel(kernel_name_, binary_path_);
@@ -185,7 +185,6 @@ TEST_F(TritonCausalConv1dUpdateTest, MultiBatchTest) {
 
   auto device = at::Device(device_str_);
   constexpr int64_t batch = 4;
-  constexpr int64_t dim = 2048;
   constexpr int64_t width = 4;
   constexpr int64_t seqlen = 1;
   constexpr bool has_bias = false;
@@ -196,70 +195,78 @@ TEST_F(TritonCausalConv1dUpdateTest, MultiBatchTest) {
   float rtol = 1e-2f;
   float atol = 5e-2f;
 
-  // Create input tensors
-  auto x = torch::randn({batch, dim, seqlen}, 
-                       torch::TensorOptions().dtype(dtype).device(device));
-  auto x_ref = x.clone().cpu();
-  
-  auto conv_state = torch::randn({batch, dim, width - 1}, 
-                                 torch::TensorOptions().dtype(dtype).device(device));
-  auto conv_state_ref = conv_state.detach().clone().cpu();
-  
-  auto weight = torch::randn({dim, width}, 
-                             torch::TensorOptions().dtype(dtype).device(device));
-  auto weight_ref = weight.clone().cpu();
-  
-  std::optional<torch::Tensor> bias = std::nullopt;
-  if (has_bias) {
-    bias = torch::randn({dim}, torch::TensorOptions().dtype(dtype).device(device));
+  for (int64_t dim : {2048, 5120}) {
+    // Create input tensors
+    auto x = torch::randn(
+        {batch, dim, seqlen},
+        torch::TensorOptions().dtype(dtype).device(device));
+    auto x_ref = x.clone().cpu();
+
+    auto conv_state = torch::randn(
+        {batch, dim, width - 1},
+        torch::TensorOptions().dtype(dtype).device(device));
+    auto conv_state_ref = conv_state.detach().clone().cpu();
+
+    auto weight = torch::randn(
+        {dim, width},
+        torch::TensorOptions().dtype(dtype).device(device));
+    auto weight_ref = weight.clone().cpu();
+
+    std::optional<torch::Tensor> bias = std::nullopt;
+    if (has_bias) {
+      bias = torch::randn(
+          {dim}, torch::TensorOptions().dtype(dtype).device(device));
+    }
+
+    // Create conv_state_indices for continuous batching
+    auto conv_state_indices = torch::arange(
+        batch, torch::TensorOptions().dtype(torch::kInt32).device(device));
+
+    // Run reference implementation on CPU
+    auto out_ref = causal_conv1d_update_ref(
+        x_ref, conv_state_ref, weight_ref, std::nullopt, silu_activation, std::nullopt);
+
+    // Run NPU kernel
+    auto npu_stream = c10_npu::getCurrentNPUStream(kDeviceId);
+    auto out = npu_causal_conv1d_update(
+        x, conv_state, weight,
+        silu_activation,
+        bias,
+        std::nullopt,  // cache_seqlens
+        conv_state_indices,
+        std::nullopt,  // num_accepted_tokens
+        std::nullopt,  // query_start_loc
+        -1,            // max_query_len
+        std::nullopt,  // intermediate_conv_window
+        -1,            // pad_slot_id
+        false          // validate_data
+    );
+    aclrtSynchronizeStream(npu_stream.stream());
+
+    // Compare results
+    auto out_cpu = out.cpu();
+    auto output_diff = (out_ref - out_cpu).abs();
+    float max_diff = output_diff.max().item().toFloat();
+    float dim_atol = dim > 2048 ? atol * 2.0f : atol;
+
+    EXPECT_LT(max_diff, dim_atol)
+        << "Output mismatch: max diff = " << max_diff
+        << ", tolerance = " << dim_atol << ", dim = " << dim
+        << ", shape: " << out_cpu.sizes()
+        << ", ref range [" << out_ref.min().item().toFloat() << ", " << out_ref.max().item().toFloat() << "]"
+        << ", actual range [" << out_cpu.min().item().toFloat() << ", " << out_cpu.max().item().toFloat() << "]";
+
+    // Compare conv_state (it should be updated)
+    auto conv_state_cpu = conv_state.cpu();
+    auto state_diff = (conv_state_ref - conv_state_cpu).abs();
+    float max_state_diff = state_diff.max().item().toFloat();
+
+    // Note: conv_state comparison might have some differences due to numerical precision
+    // We use a more relaxed tolerance for state comparison
+    EXPECT_LT(max_state_diff, atol * 2.0f)
+        << "Conv state mismatch: max diff = " << max_state_diff
+        << ", tolerance = " << (atol * 2.0f) << ", dim = " << dim;
   }
-
-  // Create conv_state_indices for continuous batching
-  auto conv_state_indices = torch::arange(batch, torch::TensorOptions().dtype(torch::kInt32).device(device));
-
-  // Run reference implementation on CPU
-  auto out_ref = causal_conv1d_update_ref(
-      x_ref, conv_state_ref, weight_ref, std::nullopt, silu_activation, std::nullopt);
-
-  // Run NPU kernel
-  auto npu_stream = c10_npu::getCurrentNPUStream(kDeviceId);
-  auto out = npu_causal_conv1d_update(
-      x, conv_state, weight, 
-      silu_activation,
-      bias,
-      std::nullopt,  // cache_seqlens
-      conv_state_indices,
-      std::nullopt,  // num_accepted_tokens
-      std::nullopt,  // query_start_loc
-      -1,            // max_query_len
-      std::nullopt,  // intermediate_conv_window
-      -1,            // pad_slot_id
-      false          // validate_data
-  );
-  aclrtSynchronizeStream(npu_stream.stream());
-
-  // Compare results
-  auto out_cpu = out.cpu();
-  auto output_diff = (out_ref - out_cpu).abs();
-  float max_diff = output_diff.max().item().toFloat();
-  
-  EXPECT_LT(max_diff, atol) 
-      << "Output mismatch: max diff = " << max_diff
-      << ", tolerance = " << atol
-      << ", shape: " << out_cpu.sizes()
-      << ", ref range [" << out_ref.min().item().toFloat() << ", " << out_ref.max().item().toFloat() << "]"
-      << ", actual range [" << out_cpu.min().item().toFloat() << ", " << out_cpu.max().item().toFloat() << "]";
-
-  // Compare conv_state (it should be updated)
-  auto conv_state_cpu = conv_state.cpu();
-  auto state_diff = (conv_state_ref - conv_state_cpu).abs();
-  float max_state_diff = state_diff.max().item().toFloat();
-  
-  // Note: conv_state comparison might have some differences due to numerical precision
-  // We use a more relaxed tolerance for state comparison
-  EXPECT_LT(max_state_diff, atol * 2.0f)
-      << "Conv state mismatch: max diff = " << max_state_diff
-      << ", tolerance = " << (atol * 2.0f);
 }
 
 }  // namespace xllm::kernel::npu

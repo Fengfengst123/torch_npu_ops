@@ -48,6 +48,12 @@ class CausalConv1dUpdateNoCacheNoMtpOp final : public OperationBase {
       : OperationBase("_causal_conv1d_update_kernel_no_cache_len_no_mtp") {}
 };
 
+class CausalConv1dUpdateQwenDecodeOp final : public OperationBase {
+ public:
+  CausalConv1dUpdateQwenDecodeOp()
+      : OperationBase("_causal_conv1d_update_qwen_decode_kernel") {}
+};
+
 }  // namespace xllm::kernel::npu
 
 

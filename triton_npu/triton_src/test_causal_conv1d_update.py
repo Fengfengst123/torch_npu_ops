@@ -873,6 +873,62 @@ def _causal_conv1d_update_kernel_no_cache_len_no_mtp(
                 )
 
 
+@triton.jit(do_not_specialize=["batch", "dim"])
+def _causal_conv1d_update_qwen_decode_kernel(
+        x_ptr,
+        conv_state_ptr,
+        weight_ptr,
+        conv_state_indices_ptr,
+        out_ptr,
+        pad_slot_id,
+        batch,
+        dim,
+        BLOCK_D: tl.constexpr,
+        SILU_ACTIVATION: tl.constexpr,
+        IS_CONTINUOUS_BATCHING: tl.constexpr,
+        USE_PAD_SLOT: tl.constexpr):
+    pid_b = tl.program_id(0)
+    pid_d = tl.program_id(1)
+    offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    mask_d = offs_d < dim
+
+    if IS_CONTINUOUS_BATCHING:
+        conv_batch_offs = tl.load(conv_state_indices_ptr + pid_b)
+    else:
+        conv_batch_offs = pid_b
+
+    if USE_PAD_SLOT:
+        if conv_batch_offs == pad_slot_id:
+            return
+
+    state_base = conv_state_ptr + conv_batch_offs * dim * 3 + offs_d * 3
+    x_base = x_ptr + pid_b * dim + offs_d
+    out_base = out_ptr + pid_b * dim + offs_d
+    w_base = weight_ptr + offs_d * 4
+
+    s0 = tl.load(state_base + 0, mask=mask_d, other=0.0)
+    s1 = tl.load(state_base + 1, mask=mask_d, other=0.0)
+    s2 = tl.load(state_base + 2, mask=mask_d, other=0.0)
+    x0 = tl.load(x_base, mask=mask_d, other=0.0)
+
+    w0 = tl.load(w_base + 0, mask=mask_d, other=0.0)
+    w1 = tl.load(w_base + 1, mask=mask_d, other=0.0)
+    w2 = tl.load(w_base + 2, mask=mask_d, other=0.0)
+    w3 = tl.load(w_base + 3, mask=mask_d, other=0.0)
+
+    acc = (s0.to(tl.float32) * w0.to(tl.float32) +
+           s1.to(tl.float32) * w1.to(tl.float32) +
+           s2.to(tl.float32) * w2.to(tl.float32) +
+           x0.to(tl.float32) * w3.to(tl.float32))
+    if SILU_ACTIVATION:
+        acc = acc / (1 + tl.exp(-acc))
+    tl.store(out_base, acc, mask=mask_d)
+
+    tl.store(state_base + 0, s1, mask=mask_d)
+    tl.store(state_base + 1, s2, mask=mask_d)
+    tl.store(state_base + 2, x0, mask=mask_d)
+
+
 def causal_conv1d_update_npu(
     x: torch.Tensor,
     conv_state: torch.Tensor,
@@ -993,31 +1049,49 @@ def causal_conv1d_update_npu(
         stride_inter_seq = stride_inter_step = stride_inter_dim = stride_inter_win = 0
 
     if cache_seqlens is None and num_accepted_tokens is None:
-        DIM_BLOCK = dim
-        _causal_conv1d_update_kernel_no_cache_len_no_mtp[(batch, 1, 1)](
-            x,
-            conv_state,
-            weight,
-            bias,
-            conv_state_indices,
-            out,
-            pad_slot_id,
-            batch=batch,
-            dim=dim,
-            align_val=16,
-            state_len=conv_state.shape[-1],  # 3 4 5
-            seq_len=x.shape[-1],  # 1 2
-            width=width,  # 4, <= seq_len + state_len
-            out_len=out.shape[-1],
-            x_batch_stride=x.stride()[0],
-            conv_batch_stride=conv_state.stride()[0],
-            out_batch_stride=out.stride()[0],
-            DIM_BLOCK=DIM_BLOCK,  # dim % DIM_BLOCK must be 0
-            HAS_BIAS=bias is not None,
-            SILU_ACTIVATION=activation in ["silu", "swish"],
-            IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
-            USE_PAD_SLOT=pad_slot_id is not None,
-        )
+        use_qwen_decode_kernel = (seqlen == 1 and state_len == 3 and width == 4 and
+                                  bias is None)
+        if use_qwen_decode_kernel:
+            _causal_conv1d_update_qwen_decode_kernel[(batch, triton.cdiv(dim, 256), 1)](
+                x,
+                conv_state,
+                weight,
+                conv_state_indices,
+                out,
+                pad_slot_id,
+                batch=batch,
+                dim=dim,
+                BLOCK_D=256,
+                SILU_ACTIVATION=activation in ["silu", "swish"],
+                IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
+                USE_PAD_SLOT=pad_slot_id is not None,
+            )
+        else:
+            DIM_BLOCK = dim
+            _causal_conv1d_update_kernel_no_cache_len_no_mtp[(batch, 1, 1)](
+                x,
+                conv_state,
+                weight,
+                bias,
+                conv_state_indices,
+                out,
+                pad_slot_id,
+                batch=batch,
+                dim=dim,
+                align_val=16,
+                state_len=conv_state.shape[-1],  # 3 4 5
+                seq_len=x.shape[-1],  # 1 2
+                width=width,  # 4, <= seq_len + state_len
+                out_len=out.shape[-1],
+                x_batch_stride=x.stride()[0],
+                conv_batch_stride=conv_state.stride()[0],
+                out_batch_stride=out.stride()[0],
+                DIM_BLOCK=DIM_BLOCK,  # dim % DIM_BLOCK must be 0
+                HAS_BIAS=bias is not None,
+                SILU_ACTIVATION=activation in ["silu", "swish"],
+                IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
+                USE_PAD_SLOT=pad_slot_id is not None,
+            )
     else:
         _causal_conv1d_update_kernel[grid](
             # Pointers to matrices
@@ -1132,7 +1206,7 @@ def causal_conv1d_update_ref(x,
 @pytest.mark.parametrize("has_bias", [False])
 @pytest.mark.parametrize("seqlen", [1])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize("dim", [2048])
+@pytest.mark.parametrize("dim", [2048, 5120])
 def test_causal_conv1d_update(bs, dim, width, seqlen, has_bias, silu_activation,
                               itype):
     device = "npu"
