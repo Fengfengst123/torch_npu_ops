@@ -16,24 +16,24 @@
 
 #pragma once
 
+#include <acl/acl.h>
+#include <glog/logging.h>
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
 
-#include <acl/acl.h>
-#include <glog/logging.h>
-
-#include "kernel_registry.h"
 #include "args_builder.h"
+#include "kernel_registry.h"
 
 namespace xllm::kernel::npu {
 
 class OperationBase {
  public:
-  explicit OperationBase(std::string kernel_name,
-                         std::string npubin_path = "")
-      : kernel_name_(std::move(kernel_name)), npubin_path_(std::move(npubin_path)) {}
+  explicit OperationBase(std::string kernel_name, std::string npubin_path = "")
+      : kernel_name_(std::move(kernel_name)),
+        npubin_path_(std::move(npubin_path)) {}
 
   virtual ~OperationBase() = default;
 
@@ -47,12 +47,14 @@ class OperationBase {
       return static_cast<rtError_t>(-1);
     }
 
-    const uint32_t block_num =
-        static_cast<uint32_t>(gridX) * static_cast<uint32_t>(gridY) * static_cast<uint32_t>(gridZ);
+    const uint32_t block_num = static_cast<uint32_t>(gridX) *
+                               static_cast<uint32_t>(gridY) *
+                               static_cast<uint32_t>(gridZ);
 
     void* ffts_addr = nullptr;
     uint32_t ffts_len = 0;
-    auto rt_ret = rtGetC2cCtrlAddr(reinterpret_cast<uint64_t*>(&ffts_addr), &ffts_len);
+    auto rt_ret =
+        rtGetC2cCtrlAddr(reinterpret_cast<uint64_t*>(&ffts_addr), &ffts_len);
     if (rt_ret != RT_ERROR_NONE) {
       LOG(ERROR) << "rtGetC2cCtrlAddr failed: " << rt_ret;
       return rt_ret;
@@ -74,7 +76,8 @@ class OperationBase {
     ab.add_aligned<int32_t>(gridY, 4);
     ab.add_aligned<int32_t>(gridZ, 4);
 
-    KernelStubHandle stub = KernelRegistry::get_instance().get_kernel_stub(kernel_name_);
+    KernelStubHandle stub =
+        KernelRegistry::get_instance().get_kernel_stub(kernel_name_);
     if (stub == nullptr) {
       LOG(ERROR) << "Kernel stub is null for '" << kernel_name_ << "'";
       cleanup_workspace(workspace, lock);
@@ -119,7 +122,8 @@ class OperationBase {
       return false;
     }
     if (!reg.register_kernel(kernel_name_, bin)) {
-      LOG(ERROR) << "Failed to register kernel '" << kernel_name_ << "' from " << bin;
+      LOG(ERROR) << "Failed to register kernel '" << kernel_name_ << "' from "
+                 << bin;
       return false;
     }
     return true;
@@ -134,13 +138,16 @@ class OperationBase {
     int64_t lock_num = -1;
 
     auto& reg = KernelRegistry::get_instance();
-    reg.get_kernel_workspace_config(kernel_name_, workspace_size, lock_init_value, lock_num);
+    reg.get_kernel_workspace_config(
+        kernel_name_, workspace_size, lock_init_value, lock_num);
 
     if (workspace_size > 0) {
       workspace_size *= static_cast<int64_t>(block_num);
-      const auto ret = aclrtMalloc(workspace, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);
+      const auto ret =
+          aclrtMalloc(workspace, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);
       if (ret != ACL_ERROR_NONE) {
-        LOG(ERROR) << "aclrtMalloc workspace failed for '" << kernel_name_ << "': " << ret;
+        LOG(ERROR) << "aclrtMalloc workspace failed for '" << kernel_name_
+                   << "': " << ret;
         return ret;
       }
     }
@@ -149,7 +156,8 @@ class OperationBase {
       const uint64_t bytes = static_cast<uint64_t>(lock_num) * sizeof(int64_t);
       auto ret = aclrtMalloc(lock, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
       if (ret != ACL_ERROR_NONE) {
-        LOG(ERROR) << "aclrtMalloc lock failed for '" << kernel_name_ << "': " << ret;
+        LOG(ERROR) << "aclrtMalloc lock failed for '" << kernel_name_
+                   << "': " << ret;
         if (*workspace) {
           aclrtFree(*workspace);
           *workspace = nullptr;
@@ -158,9 +166,11 @@ class OperationBase {
       }
 
       std::vector<int64_t> init(static_cast<size_t>(lock_num), lock_init_value);
-      ret = aclrtMemcpy(*lock, bytes, init.data(), bytes, ACL_MEMCPY_HOST_TO_DEVICE);
+      ret = aclrtMemcpy(
+          *lock, bytes, init.data(), bytes, ACL_MEMCPY_HOST_TO_DEVICE);
       if (ret != ACL_ERROR_NONE) {
-        LOG(ERROR) << "aclrtMemcpy lock init failed for '" << kernel_name_ << "': " << ret;
+        LOG(ERROR) << "aclrtMemcpy lock init failed for '" << kernel_name_
+                   << "': " << ret;
         if (*workspace) {
           aclrtFree(*workspace);
           *workspace = nullptr;
@@ -191,6 +201,3 @@ class OperationBase {
 };
 
 }  // namespace xllm::kernel::npu
-
-
-

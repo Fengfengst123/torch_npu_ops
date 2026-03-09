@@ -14,53 +14,53 @@
  * ==============================================================================
  */
 
-#include "triton_ops_api.h"
 #include "operation_factory.h"
+#include "triton_ops_api.h"
 
-namespace xllm::kernel::npu{
+namespace xllm::kernel::npu {
 
-void rope_inplace(
-    torch::Tensor& x,
-    torch::Tensor& sin,
-    torch::Tensor& cos,
-    uint32_t rope_dim) {
-   
-    auto org_shape = x.sizes();
-    int32_t bsz = 0;
-    int32_t head_num = 0;
-    int32_t hidden_size = 0;
-    if (x.dim() == 2) {
-        bsz = x.size(0);
-        head_num = 1;
-        hidden_size = x.size(1);
-    } else if (x.dim() == 3) {
-        bsz = x.size(0);
-        head_num = x.size(1);
-        hidden_size = x.size(2);
-        x = x.view({-1, hidden_size});
-    }
-    int32_t gridX = bsz * head_num;
-    int32_t gridY = 1;
-    int32_t gridZ = 1;
-    int32_t x_stride = x.stride(0);
-    int32_t rope_stride = cos.stride(0);
-    auto npuStream = c10_npu::getCurrentNPUStream();
-    rtStream_t stream = static_cast<rtStream_t>(npuStream.stream());
-    
-    auto& op = OperationFactory::instance().rope_inplace();
-    auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
-        ab.constructArgs(x.data_ptr(),
-                         sin.data_ptr(),
-                         cos.data_ptr(),
-                         head_num, x_stride, rope_stride);
-    });
-    if (ret != RT_ERROR_NONE) {
-        LOG(ERROR) << "rtKernelLaunch failed for 'rope_inplace_kernel': " << ret;
-    }
+void rope_inplace(torch::Tensor& x,
+                  torch::Tensor& sin,
+                  torch::Tensor& cos,
+                  uint32_t rope_dim) {
+  auto org_shape = x.sizes();
+  int32_t bsz = 0;
+  int32_t head_num = 0;
+  int32_t hidden_size = 0;
+  if (x.dim() == 2) {
+    bsz = x.size(0);
+    head_num = 1;
+    hidden_size = x.size(1);
+  } else if (x.dim() == 3) {
+    bsz = x.size(0);
+    head_num = x.size(1);
+    hidden_size = x.size(2);
+    x = x.view({-1, hidden_size});
+  }
+  int32_t gridX = bsz * head_num;
+  int32_t gridY = 1;
+  int32_t gridZ = 1;
+  int32_t x_stride = x.stride(0);
+  int32_t rope_stride = cos.stride(0);
+  auto npuStream = c10_npu::getCurrentNPUStream();
+  rtStream_t stream = static_cast<rtStream_t>(npuStream.stream());
 
-    if (org_shape.size() == 3) {
-        x = x.view(org_shape);
-    }
+  auto& op = OperationFactory::instance().rope_inplace();
+  auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+    ab.constructArgs(x.data_ptr(),
+                     sin.data_ptr(),
+                     cos.data_ptr(),
+                     head_num,
+                     x_stride,
+                     rope_stride);
+  });
+  if (ret != RT_ERROR_NONE) {
+    LOG(ERROR) << "rtKernelLaunch failed for 'rope_inplace_kernel': " << ret;
+  }
+
+  if (org_shape.size() == 3) {
+    x = x.view(org_shape);
+  }
 }
 
-}
+}  // namespace xllm::kernel::npu

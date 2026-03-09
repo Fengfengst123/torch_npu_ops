@@ -45,15 +45,18 @@ class OperationFactory final {
   }
 
   RecurrentGatedDeltaRuleFwdOp& recurrent_gated_delta_rule_fwd() {
-    return get_or_create<RecurrentGatedDeltaRuleFwdOp>("fused_recurrent_gated_delta_rule_fwd_kernel");
+    return get_or_create<RecurrentGatedDeltaRuleFwdOp>(
+        "fused_recurrent_gated_delta_rule_fwd_kernel");
   }
 
   CausalConv1dUpdateNoCacheNoMtpOp& causal_conv1d_update_no_cache_no_mtp() {
-    return get_or_create<CausalConv1dUpdateNoCacheNoMtpOp>("_causal_conv1d_update_kernel_no_cache_len_no_mtp");
+    return get_or_create<CausalConv1dUpdateNoCacheNoMtpOp>(
+        "_causal_conv1d_update_kernel_no_cache_len_no_mtp");
   }
 
   CausalConv1dUpdateQwenDecodeOp& causal_conv1d_update_qwen_decode() {
-    return get_or_create<CausalConv1dUpdateQwenDecodeOp>("_causal_conv1d_update_qwen_decode_kernel");
+    return get_or_create<CausalConv1dUpdateQwenDecodeOp>(
+        "_causal_conv1d_update_qwen_decode_kernel");
   }
 
  private:
@@ -61,7 +64,8 @@ class OperationFactory final {
 
   template <class T>
   T& get_or_create(const char* key) {
-    static_assert(std::is_base_of_v<OperationBase, T>, "T must derive from OperationBase");
+    static_assert(std::is_base_of_v<OperationBase, T>,
+                  "T must derive from OperationBase");
     auto it = ops_.find(key);
     if (it != ops_.end()) {
       return *static_cast<T*>(it->second.get());
@@ -76,5 +80,3 @@ class OperationFactory final {
 };
 
 }  // namespace xllm::kernel::npu
-
-

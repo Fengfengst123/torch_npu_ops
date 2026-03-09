@@ -16,24 +16,22 @@
 
 #pragma once
 
-#include <optional>
-#include <cmath>
-#include <limits>
-#include <algorithm>
-
 #include <torch/torch.h>
 #include <torch_npu/csrc/aten/NPUNativeFunctions.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/torch_npu.h>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <optional>
 
 namespace xllm::kernel::npu {
 
-void rope_inplace(
-    torch::Tensor& x,
-    torch::Tensor& sin,
-    torch::Tensor& cos,
-    uint32_t rope_dim = 64);
+void rope_inplace(torch::Tensor& x,
+                  torch::Tensor& sin,
+                  torch::Tensor& cos,
+                  uint32_t rope_dim = 64);
 
 std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
     torch::Tensor& A_log,
@@ -71,7 +69,7 @@ torch::Tensor npu_causal_conv1d_update(
     torch::Tensor& x,
     torch::Tensor& conv_state,
     torch::Tensor& weight,
-    bool activation = true, 
+    bool activation = true,
     const std::optional<torch::Tensor>& bias = std::nullopt,
     const std::optional<torch::Tensor>& cache_seqlens = std::nullopt,
     const std::optional<torch::Tensor>& conv_state_indices = std::nullopt,

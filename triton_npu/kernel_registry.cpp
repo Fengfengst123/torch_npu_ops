@@ -17,11 +17,10 @@
 #include "kernel_registry.h"
 
 #include <acl/acl.h>
+#include <glog/logging.h>
 
 #include <filesystem>
 #include <fstream>
-
-#include <glog/logging.h>
 #include <nlohmann/json.hpp>
 
 namespace xllm::kernel::npu {
@@ -87,8 +86,7 @@ bool KernelRegistry::parse_json_config(const std::string& json_path,
     } else if (j["lock_init_value"].is_null()) {
       lock_init_value = -1;
     } else {
-      LOG(WARNING)
-          << "'lock_init_value' is not an integer, using default -1";
+      LOG(WARNING) << "'lock_init_value' is not an integer, using default -1";
       lock_init_value = -1;
     }
   } else {
@@ -181,15 +179,15 @@ bool KernelRegistry::register_kernel(const std::string& kernel_name,
   }
 
   kernel_infos_[kernel_name] = info;
-  info.stub_func = 
-	(KernelStubHandle)info.persistent_func_name.c_str();
+  info.stub_func = (KernelStubHandle)info.persistent_func_name.c_str();
 
   LOG(INFO) << "Successfully registered kernel '" << kernel_name
             << "' (function: " << parsed_kernel_name << ")";
   return true;
 }
 
-KernelStubHandle KernelRegistry::get_kernel_stub(const std::string& kernel_name) const {
+KernelStubHandle KernelRegistry::get_kernel_stub(
+    const std::string& kernel_name) const {
   auto it = kernel_infos_.find(kernel_name);
   if (it == kernel_infos_.end()) {
     return nullptr;
@@ -202,11 +200,10 @@ bool KernelRegistry::is_kernel_registered(
   return kernel_infos_.find(kernel_name) != kernel_infos_.end();
 }
 
-bool KernelRegistry::get_kernel_workspace_config(
-    const std::string& kernel_name,
-    int64_t& workspace_size,
-    int64_t& lock_init_value,
-    int64_t& lock_num) const {
+bool KernelRegistry::get_kernel_workspace_config(const std::string& kernel_name,
+                                                 int64_t& workspace_size,
+                                                 int64_t& lock_init_value,
+                                                 int64_t& lock_num) const {
   auto it = kernel_infos_.find(kernel_name);
   if (it != kernel_infos_.end()) {
     workspace_size = it->second.workspace_size;
@@ -253,8 +250,7 @@ char* KernelRegistry::load_binary_file(const std::string& file_path,
   return buffer;
 }
 
-bool KernelRegistry::register_binary(KernelInfo& info,
-                                     uint32_t binary_size) {
+bool KernelRegistry::register_binary(KernelInfo& info, uint32_t binary_size) {
   if (!info.buffer || binary_size == 0) {
     LOG(ERROR) << "register_binary: invalid buffer or size";
     return false;
@@ -268,7 +264,7 @@ bool KernelRegistry::register_binary(KernelInfo& info,
   binary.data = info.buffer;
   binary.length = binary_size;
   if (info.mix_mode == "aiv") {
-    binary.magic = RT_DEV_BINARY_MAGIC_ELF_AIVEC; 
+    binary.magic = RT_DEV_BINARY_MAGIC_ELF_AIVEC;
   } else if (info.mix_mode == "aic") {
     binary.magic = RT_DEV_BINARY_MAGIC_ELF_AICUBE;
   } else {
@@ -309,8 +305,9 @@ void KernelRegistry::cleanup() {
     if (info.bin_handle) {
       int ret = rtDevBinaryUnRegister(info.bin_handle);
       if (ret != 0) {
-        LOG(ERROR) << "rtDevBinaryUnRegister Failed for kernel '" << name << "': error=" << ret;
-      } 
+        LOG(ERROR) << "rtDevBinaryUnRegister Failed for kernel '" << name
+                   << "': error=" << ret;
+      }
     }
   }
   kernel_infos_.clear();
@@ -319,5 +316,3 @@ void KernelRegistry::cleanup() {
 }
 
 }  // namespace xllm::kernel::npu
-
-

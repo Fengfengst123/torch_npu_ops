@@ -14,28 +14,27 @@
  * ==============================================================================
  */
 
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <torch_npu/torch_npu.h>
 
-#include <glog/logging.h>
+#include <vector>
 
-#include "torch_api/triton_ops_api.h"
 #include "kernel_registry.h"
 #include "test/test_utils.h"
+#include "torch_api/triton_ops_api.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
-#include <vector>
 
 namespace xllm::kernel::npu {
 
 constexpr int32_t kDeviceId = 0;
 constexpr float kTolerance = 1e-2f;  // bfloat16 tolerance
 
-torch::Tensor rope_ref_cpu(
-    const torch::Tensor& x,
-    const torch::Tensor& sin,
-    const torch::Tensor& cos,
-    int64_t rope_dim) {
+torch::Tensor rope_ref_cpu(const torch::Tensor& x,
+                           const torch::Tensor& sin,
+                           const torch::Tensor& cos,
+                           int64_t rope_dim) {
   const int64_t total_dim = x.size(-1);
   const auto orig_dtype = x.dtype();
 
@@ -44,7 +43,8 @@ torch::Tensor rope_ref_cpu(
     pre = x.slice(-1, 0, total_dim - rope_dim);  // [..., total_dim - rope_dim]
   }
 
-  auto x_rope = x.slice(-1, total_dim - rope_dim, total_dim);  // [..., rope_dim]
+  auto x_rope =
+      x.slice(-1, total_dim - rope_dim, total_dim);  // [..., rope_dim]
 
   torch::Tensor sin_exp = sin;
   torch::Tensor cos_exp = cos;
@@ -58,15 +58,23 @@ torch::Tensor rope_ref_cpu(
   cos_exp = cos_exp.to(torch::kFloat32);
   auto x_rope_f = x_rope.to(torch::kFloat32);
 
-  auto idx_even = torch::arange(0, rope_dim, 2, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
-  auto idx_odd  = torch::arange(1, rope_dim, 2, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
+  auto idx_even = torch::arange(
+      0,
+      rope_dim,
+      2,
+      torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
+  auto idx_odd = torch::arange(
+      1,
+      rope_dim,
+      2,
+      torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
 
   auto x_even = x_rope_f.index_select(-1, idx_even);
-  auto x_odd  = x_rope_f.index_select(-1, idx_odd);
+  auto x_odd = x_rope_f.index_select(-1, idx_odd);
 
   auto x_rotate_f = torch::empty_like(x_rope_f);
   x_rotate_f.index_copy_(-1, idx_even, -x_odd);
-  x_rotate_f.index_copy_(-1, idx_odd,  x_even);
+  x_rotate_f.index_copy_(-1, idx_odd, x_even);
 
   auto out_rope = x_rope_f * cos_exp + x_rotate_f * sin_exp;
   out_rope = out_rope.to(orig_dtype);
@@ -77,7 +85,8 @@ torch::Tensor rope_ref_cpu(
   return out_rope;
 }
 
-class TritonRopeInplaceTest : public ::testing::TestWithParam<std::tuple<int64_t, int64_t>> {
+class TritonRopeInplaceTest
+    : public ::testing::TestWithParam<std::tuple<int64_t, int64_t>> {
  protected:
   static bool npu_initialized_;
 
@@ -113,8 +122,9 @@ class TritonRopeInplaceTest : public ::testing::TestWithParam<std::tuple<int64_t
           torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU);
       return;
     }
-    tensor_options_ =
-        torch::TensorOptions().dtype(torch::kBFloat16).device("npu:" + std::to_string(kDeviceId));
+    tensor_options_ = torch::TensorOptions()
+                          .dtype(torch::kBFloat16)
+                          .device("npu:" + std::to_string(kDeviceId));
     torch::manual_seed(42);
     kernel_name_ = "rope_inplace_kernel";
     binary_filename_ = "rope_inplace_kernel.npubin";
@@ -147,8 +157,10 @@ TEST_P(TritonRopeInplaceTest, RopeInplaceKernelTest) {
   ASSERT_EQ(rope_dim % 2, 0);
 
   auto device = at::Device(device_str_);
-  auto options_cpu_bf16 = torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU);
-  auto options_npu_bf16 = torch::TensorOptions().dtype(torch::kBFloat16).device(device);
+  auto options_cpu_bf16 =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU);
+  auto options_npu_bf16 =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(device);
 
   // x: (batch, head, hidden_size)；sin/cos: (batch, rope_dim）
   auto x_cpu = torch::randn({batch, head, hidden_size}, options_cpu_bf16);
@@ -170,21 +182,19 @@ TEST_P(TritonRopeInplaceTest, RopeInplaceKernelTest) {
   auto diff = torch::abs(out_npu_cpu - out_golden);
   float max_diff = torch::max(diff).item<float>();
   EXPECT_LT(max_diff, kTolerance)
-      << "rope_inplace batch=" << batch << " head=" << head
-      << " max diff (" << max_diff << ") > tolerance (" << kTolerance << ")";
+      << "rope_inplace batch=" << batch << " head=" << head << " max diff ("
+      << max_diff << ") > tolerance (" << kTolerance << ")";
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    RopeInplaceParams,
-    TritonRopeInplaceTest,
-    ::testing::Values(
-        std::make_tuple(1, 8),
-        std::make_tuple(4, 8),
-        std::make_tuple(8, 8),
-        std::make_tuple(1, 1),
-        std::make_tuple(4, 1),
-        std::make_tuple(8, 1),
-        std::make_tuple(16, 8)));
+INSTANTIATE_TEST_SUITE_P(RopeInplaceParams,
+                         TritonRopeInplaceTest,
+                         ::testing::Values(std::make_tuple(1, 8),
+                                           std::make_tuple(4, 8),
+                                           std::make_tuple(8, 8),
+                                           std::make_tuple(1, 1),
+                                           std::make_tuple(4, 1),
+                                           std::make_tuple(8, 1),
+                                           std::make_tuple(16, 8)));
 
 }  // namespace xllm::kernel::npu
 
@@ -211,5 +221,3 @@ int main(int argc, char** argv) {
   int result = RUN_ALL_TESTS();
   return result;
 }
-
-

@@ -5,10 +5,10 @@
 using namespace std;
 namespace atb {
 void npu_reshape_and_cache(const at::Tensor& key,
-                            const at::Tensor& value,
-                            at::Tensor& key_cache,
-                            at::Tensor& value_cache,
-                            const at::Tensor& slot_indices) {
+                           const at::Tensor& value,
+                           at::Tensor& key_cache,
+                           at::Tensor& value_cache,
+                           const at::Tensor& slot_indices) {
   const c10::OptionalDeviceGuard device_guard(device_of(key));
   OpParamCache<atb::infer::ReshapeAndCacheParam>& reshapeAndCacheParamCache =
       OpParamCache<atb::infer::ReshapeAndCacheParam>::getInstance();

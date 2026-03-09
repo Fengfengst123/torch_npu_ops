@@ -39,7 +39,8 @@ class LayerNormFwdOp final : public OperationBase {
 
 class RecurrentGatedDeltaRuleFwdOp final : public OperationBase {
  public:
-  RecurrentGatedDeltaRuleFwdOp() : OperationBase("fused_recurrent_gated_delta_rule_fwd_kernel") {}
+  RecurrentGatedDeltaRuleFwdOp()
+      : OperationBase("fused_recurrent_gated_delta_rule_fwd_kernel") {}
 };
 
 class CausalConv1dUpdateNoCacheNoMtpOp final : public OperationBase {
@@ -55,6 +56,3 @@ class CausalConv1dUpdateQwenDecodeOp final : public OperationBase {
 };
 
 }  // namespace xllm::kernel::npu
-
-
-

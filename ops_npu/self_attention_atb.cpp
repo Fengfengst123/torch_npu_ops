@@ -5,14 +5,14 @@
 using namespace std;
 namespace atb {
 void npu_flash_attention(const at::Tensor& query,
-                          const at::Tensor& key,
-                          const at::Tensor& value,
-                          const at::Tensor& mask,
-                          const at::Tensor& seq_len,
-                          const double scale_value,
-                          const int64_t num_heads,
-                          const int64_t num_kv_heads,
-                          at::Tensor& out) {
+                         const at::Tensor& key,
+                         const at::Tensor& value,
+                         const at::Tensor& mask,
+                         const at::Tensor& seq_len,
+                         const double scale_value,
+                         const int64_t num_heads,
+                         const int64_t num_kv_heads,
+                         at::Tensor& out) {
   const c10::OptionalDeviceGuard device_guard(device_of(query));
   OpParamCache<atb::infer::SelfAttentionParam>& selfAttentionParamCache =
       OpParamCache<atb::infer::SelfAttentionParam>::getInstance();

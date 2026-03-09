@@ -15,15 +15,14 @@
  */
 
 #include <acl/acl.h>
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <torch_npu/torch_npu.h>
 
-#include <glog/logging.h>
-
-#include "torch_api/triton_ops_api.h"
 #include "kernel_registry.h"
 #include "test/test_utils.h"
+#include "torch_api/triton_ops_api.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 
 namespace xllm::kernel::npu {
@@ -83,7 +82,8 @@ class TritonFusedGdnGatingTest : public ::testing::Test {
     binary_path_ = GetKernelBinaryPath(binary_filename_);
     auto& reg = KernelRegistry::get_instance();
     ASSERT_TRUE(reg.register_kernel(kernel_name_, binary_path_))
-        << "Failed to register kernel: " << kernel_name_ << " from " << binary_path_;
+        << "Failed to register kernel: " << kernel_name_ << " from "
+        << binary_path_;
     ASSERT_NE(reg.get_kernel_stub(kernel_name_), nullptr)
         << "Failed to get kernel stub: " << kernel_name_;
   }
@@ -182,4 +182,3 @@ int main(int argc, char** argv) {
   int result = RUN_ALL_TESTS();
   return result;
 }
-

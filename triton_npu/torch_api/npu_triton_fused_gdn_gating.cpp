@@ -14,8 +14,8 @@
  * ==============================================================================
  */
 
-#include "triton_ops_api.h"
 #include "operation_factory.h"
+#include "triton_ops_api.h"
 
 namespace xllm::kernel::npu {
 namespace {
@@ -37,56 +37,56 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
     torch::Tensor& dt_bias,
     float beta,
     float threshold) {
-    validate_tensor(A_log, "A_log");
-    validate_tensor(a, "a");
-    validate_tensor(b, "b");
-    validate_tensor(dt_bias, "dt_bias");
+  validate_tensor(A_log, "A_log");
+  validate_tensor(a, "a");
+  validate_tensor(b, "b");
+  validate_tensor(dt_bias, "dt_bias");
 
-    TORCH_CHECK(A_log.dtype() == torch::kFloat32, "A_log must be float32");
-    TORCH_CHECK(dt_bias.dtype() == torch::kFloat32, "dt_bias must be float32");
+  TORCH_CHECK(A_log.dtype() == torch::kFloat32, "A_log must be float32");
+  TORCH_CHECK(dt_bias.dtype() == torch::kFloat32, "dt_bias must be float32");
 
-    TORCH_CHECK(A_log.dim() == 1, "A_log must be 1D tensor");
-    TORCH_CHECK(a.dim() == 2, "a must be 2D tensor (batch, num_heads)");
-    TORCH_CHECK(b.dim() == 2, "b must be 2D tensor (batch, num_heads)");
-    TORCH_CHECK(dt_bias.dim() == 1, "dt_bias must be 1D tensor");
+  TORCH_CHECK(A_log.dim() == 1, "A_log must be 1D tensor");
+  TORCH_CHECK(a.dim() == 2, "a must be 2D tensor (batch, num_heads)");
+  TORCH_CHECK(b.dim() == 2, "b must be 2D tensor (batch, num_heads)");
+  TORCH_CHECK(dt_bias.dim() == 1, "dt_bias must be 1D tensor");
 
-    int64_t batch = a.size(0);
-    int64_t num_heads = a.size(1);
+  int64_t batch = a.size(0);
+  int64_t num_heads = a.size(1);
 
-    torch::Tensor g = torch::empty(
-        {1, batch, num_heads},
-        torch::TensorOptions().dtype(torch::kFloat32).device(a.device()));
+  torch::Tensor g = torch::empty(
+      {1, batch, num_heads},
+      torch::TensorOptions().dtype(torch::kFloat32).device(a.device()));
 
-    torch::Tensor beta_output =
-        torch::empty({1, batch, num_heads},
-                    torch::TensorOptions().dtype(b.dtype()).device(b.device()));
+  torch::Tensor beta_output =
+      torch::empty({1, batch, num_heads},
+                   torch::TensorOptions().dtype(b.dtype()).device(b.device()));
 
-    int32_t seq_len = 1;
-    int32_t gridX = static_cast<int32_t>(batch);
-    int32_t gridY = seq_len;
-    int32_t gridZ =
-        static_cast<int32_t>((num_heads + 7) / 8);  // ceil(num_heads / 8)
+  int32_t seq_len = 1;
+  int32_t gridX = static_cast<int32_t>(batch);
+  int32_t gridY = seq_len;
+  int32_t gridZ =
+      static_cast<int32_t>((num_heads + 7) / 8);  // ceil(num_heads / 8)
 
-    auto npu_stream = c10_npu::getCurrentNPUStream();
-    rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
+  auto npu_stream = c10_npu::getCurrentNPUStream();
+  rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
 
-    void* gPtr = g.data_ptr();
-    void* betaOutputPtr = beta_output.data_ptr();
-    void* ALogPtr = A_log.data_ptr();
-    void* aPtr = a.data_ptr();
-    void* bPtr = b.data_ptr();
-    void* dtBiasPtr = dt_bias.data_ptr();
+  void* gPtr = g.data_ptr();
+  void* betaOutputPtr = beta_output.data_ptr();
+  void* ALogPtr = A_log.data_ptr();
+  void* aPtr = a.data_ptr();
+  void* bPtr = b.data_ptr();
+  void* dtBiasPtr = dt_bias.data_ptr();
 
-    auto& op = OperationFactory::instance().fused_gdn_gating();
-    auto ret = op.execute(
-        stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
-          ab.constructArgs(gPtr, betaOutputPtr, ALogPtr, aPtr, bPtr, dtBiasPtr, seq_len);
-        });
-    if (ret != RT_ERROR_NONE) {
-      LOG(ERROR) << "rtKernelLaunch failed for 'fused_gdn_gating_head8_kernel': " << ret;
-    }
-    return std::make_pair(g, beta_output);
+  auto& op = OperationFactory::instance().fused_gdn_gating();
+  auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+    ab.constructArgs(
+        gPtr, betaOutputPtr, ALogPtr, aPtr, bPtr, dtBiasPtr, seq_len);
+  });
+  if (ret != RT_ERROR_NONE) {
+    LOG(ERROR) << "rtKernelLaunch failed for 'fused_gdn_gating_head8_kernel': "
+               << ret;
+  }
+  return std::make_pair(g, beta_output);
 }
 
 }  // namespace xllm::kernel::npu
- 

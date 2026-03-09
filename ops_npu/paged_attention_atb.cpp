@@ -29,14 +29,14 @@ static atb::infer::PagedAttentionParam createPagedAttentionParam(
 }
 
 void npu_paged_attention(const at::Tensor& query,
-                          const at::Tensor& key_cache,
-                          const at::Tensor& value_cache,
-                          int64_t num_kv_heads,
-                          int64_t num_heads,
-                          double scale_value,
-                          const at::Tensor& block_table,
-                          const at::Tensor& context_lens,
-                          at::Tensor& out) {
+                         const at::Tensor& key_cache,
+                         const at::Tensor& value_cache,
+                         int64_t num_kv_heads,
+                         int64_t num_heads,
+                         double scale_value,
+                         const at::Tensor& block_table,
+                         const at::Tensor& context_lens,
+                         at::Tensor& out) {
   const c10::OptionalDeviceGuard device_guard(device_of(query));
   OpParamCache<atb::infer::PagedAttentionParam>& pagedAttentionParamCache =
       OpParamCache<atb::infer::PagedAttentionParam>::getInstance();
@@ -58,21 +58,22 @@ void npu_paged_attention(const at::Tensor& query,
 }
 
 void npu_custom_paged_attention(const at::Tensor& query,
-                                 const at::Tensor& key_cache,
-                                 const at::Tensor& value_cache,
-                                 int64_t num_kv_heads,
-                                 int64_t num_heads,
-                                 double scale_value,
-                                 const at::Tensor& block_table,
-                                 const at::Tensor& context_lens,
-                                 const at::Tensor& tiling_data,
-                                 at::Tensor& out) {
+                                const at::Tensor& key_cache,
+                                const at::Tensor& value_cache,
+                                int64_t num_kv_heads,
+                                int64_t num_heads,
+                                double scale_value,
+                                const at::Tensor& block_table,
+                                const at::Tensor& context_lens,
+                                const at::Tensor& tiling_data,
+                                at::Tensor& out) {
   const c10::OptionalDeviceGuard device_guard(device_of(query));
   OpParamCache<atb::customize::CustomPagedAttentionParam>&
-      customPagedAttentionParamCache =
-          OpParamCache<atb::customize::CustomPagedAttentionParam>::getInstance();
+      customPagedAttentionParamCache = OpParamCache<
+          atb::customize::CustomPagedAttentionParam>::getInstance();
 
-  // Create base PagedAttentionParam and then convert to CustomPagedAttentionParam
+  // Create base PagedAttentionParam and then convert to
+  // CustomPagedAttentionParam
   atb::infer::PagedAttentionParam pagedparam =
       createPagedAttentionParam(num_heads, num_kv_heads, scale_value);
   atb::customize::CustomPagedAttentionParam customPagedParam(pagedparam);

@@ -33,9 +33,7 @@ constexpr size_t CONST_4 = 4;
 
 class ArgsBuilder final {
  public:
-  ArgsBuilder() {
-    buf_.reserve(256);
-  }
+  ArgsBuilder() { buf_.reserve(256); }
 
   const void* data() const { return buf_.data(); }
   size_t size() const { return size_; }
@@ -52,13 +50,15 @@ class ArgsBuilder final {
 
   template <typename T>
   void add(const T& v) {
-    static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "T must be trivially copyable");
     add_aligned<T>(v, alignof(T));
   }
 
   template <typename T>
   void add_aligned(const T& v, size_t alignment) {
-    static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "T must be trivially copyable");
     pad_to(alignment);
     ensure_capacity(sizeof(T));
     std::memcpy(buf_.data() + size_, &v, sizeof(T));
@@ -135,12 +135,15 @@ class ArgsBuilder final {
     return ptr_value == nullptr;
   }
 
-  bool is_nullptr_at_offset(const void* data, size_t data_size, size_t offset) const {
+  bool is_nullptr_at_offset(const void* data,
+                            size_t data_size,
+                            size_t offset) const {
     if (offset + sizeof(void*) > data_size) {
       return false;
     }
     void* ptr_value = nullptr;
-    std::memcpy(&ptr_value, static_cast<const uint8_t*>(data) + offset, sizeof(void*));
+    std::memcpy(
+        &ptr_value, static_cast<const uint8_t*>(data) + offset, sizeof(void*));
     return ptr_value == nullptr;
   }
 
@@ -161,15 +164,17 @@ class ArgsBuilder final {
 
         const size_t aligned_offset = (i / sizeof(void*)) * sizeof(void*);
         const bool this_is_null = is_nullptr_at_offset(aligned_offset);
-        const bool other_is_null = is_nullptr_at_offset(other_data, other_size, aligned_offset);
+        const bool other_is_null =
+            is_nullptr_at_offset(other_data, other_size, aligned_offset);
 
         if (this_is_null || other_is_null) {
           info.is_nullptr_field = true;
           std::ostringstream oss;
-          oss << "Difference at offset " << i << " (aligned to " << aligned_offset
-              << "): ";
+          oss << "Difference at offset " << i << " (aligned to "
+              << aligned_offset << "): ";
           if (this_is_null && other_is_null) {
-            oss << "Both are nullptr, but bytes differ (likely padding/uninitialized)";
+            oss << "Both are nullptr, but bytes differ (likely "
+                   "padding/uninitialized)";
           } else if (this_is_null) {
             oss << "This is nullptr, other is non-null";
           } else {
@@ -210,13 +215,14 @@ class ArgsBuilder final {
     oss << "ArgsBuilder Debug Info:\n";
     oss << "  Total size: " << size_ << " bytes\n";
     oss << "  Buffer capacity: " << buf_.capacity() << " bytes\n";
-    
+
     oss << "  Pointer fields (8-byte aligned, checking for nullptr):\n";
     for (size_t i = 0; i + sizeof(void*) <= size_; i += sizeof(void*)) {
       if (i % 8 == 0) {
         void* ptr_value = nullptr;
         std::memcpy(&ptr_value, buf_.data() + i, sizeof(void*));
-        oss << "    [" << std::setw(4) << std::setfill('0') << std::hex << i << std::dec << "] ";
+        oss << "    [" << std::setw(4) << std::setfill('0') << std::hex << i
+            << std::dec << "] ";
         if (ptr_value == nullptr) {
           oss << "void* = nullptr (0x0000000000000000)";
         } else {
@@ -226,11 +232,12 @@ class ArgsBuilder final {
         oss << "\n";
       }
     }
-    
+
     oss << "  Hex dump (first 64 bytes):\n";
     const size_t dump_size = std::min(size_, size_t(64));
     for (size_t i = 0; i < dump_size; i += 16) {
-      oss << "    [" << std::setw(4) << std::setfill('0') << std::hex << i << std::dec << "] ";
+      oss << "    [" << std::setw(4) << std::setfill('0') << std::hex << i
+          << std::dec << "] ";
       for (size_t j = 0; j < 16 && (i + j) < dump_size; ++j) {
         oss << std::setw(2) << std::setfill('0') << std::hex
             << (static_cast<unsigned>(buf_[i + j]) & 0xFF) << " ";
@@ -260,10 +267,12 @@ class ArgsBuilder final {
     using U = std::remove_cv_t<T>;
     if constexpr (std::is_pointer_v<U>) {
       return CONST_8;
-    } else if constexpr (std::is_same_v<U, double> || std::is_same_v<U, int64_t> ||
+    } else if constexpr (std::is_same_v<U, double> ||
+                         std::is_same_v<U, int64_t> ||
                          std::is_same_v<U, uint64_t>) {
       return CONST_8;
-    } else if constexpr (std::is_same_v<U, float> || std::is_same_v<U, int32_t> ||
+    } else if constexpr (std::is_same_v<U, float> ||
+                         std::is_same_v<U, int32_t> ||
                          std::is_same_v<U, uint32_t>) {
       return CONST_4;
     } else if constexpr (std::is_integral_v<U> || std::is_floating_point_v<U>) {
@@ -282,7 +291,8 @@ class ArgsBuilder final {
     } else if constexpr (std::is_integral_v<U> || std::is_floating_point_v<U>) {
       add_aligned<U>(v, packed_alignment<U>());
     } else {
-      static_assert(std::is_trivially_copyable_v<U>, "T must be trivially copyable");
+      static_assert(std::is_trivially_copyable_v<U>,
+                    "T must be trivially copyable");
       add_aligned<U>(v, packed_alignment<U>());
     }
   }
@@ -292,6 +302,3 @@ class ArgsBuilder final {
 };
 
 }  // namespace xllm::kernel::npu
-
-
-

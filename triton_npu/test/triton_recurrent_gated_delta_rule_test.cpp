@@ -53,67 +53,65 @@ std::pair<torch::Tensor, torch::Tensor> torch_recurrent_gated_delta_rule(
     const std::optional<torch::Tensor>& initial_state,
     bool output_final_state,
     const std::optional<float>& scale_opt) {
+  auto initial_dtype = query.scalar_type();
+  auto device = query.device();
 
-    auto initial_dtype = query.scalar_type();
-    auto device = query.device();
+  // transpose(1,2): (B,T,H,K) -> (B,H,T,K), same as Python ref
+  auto query_ = query.transpose(1, 2).contiguous().to(torch::kFloat32);
+  auto key_ = key.transpose(1, 2).contiguous().to(torch::kFloat32);
+  auto value_ = value.transpose(1, 2).contiguous().to(torch::kFloat32);
+  auto g_ = g.transpose(1, 2).contiguous().to(torch::kFloat32);
+  auto beta_ = beta.transpose(1, 2).contiguous().to(torch::kFloat32);
 
-    // transpose(1,2): (B,T,H,K) -> (B,H,T,K), same as Python ref
-    auto query_ = query.transpose(1, 2).contiguous().to(torch::kFloat32);
-    auto key_ = key.transpose(1, 2).contiguous().to(torch::kFloat32);
-    auto value_ = value.transpose(1, 2).contiguous().to(torch::kFloat32);
-    auto g_ = g.transpose(1, 2).contiguous().to(torch::kFloat32);
-    auto beta_ = beta.transpose(1, 2).contiguous().to(torch::kFloat32);
+  int64_t batch_size = key_.size(0);
+  int64_t num_heads = key_.size(1);
+  int64_t sequence_length = key_.size(2);
+  int64_t k_head_dim = key_.size(3);
+  int64_t v_head_dim = value_.size(3);
 
-    int64_t batch_size = key_.size(0);
-    int64_t num_heads = key_.size(1);
-    int64_t sequence_length = key_.size(2);
-    int64_t k_head_dim = key_.size(3);
-    int64_t v_head_dim = value_.size(3);
+  // scale: default 1/sqrt(K) as in Python ref
+  float scale = scale_opt.has_value()
+                    ? scale_opt.value()
+                    : 1.0f / std::sqrt(static_cast<float>(k_head_dim));
+  query_ = query_ * scale;
 
-    // scale: default 1/sqrt(K) as in Python ref
-    float scale = scale_opt.has_value()
-                      ? scale_opt.value()
-                      : 1.0f / std::sqrt(static_cast<float>(k_head_dim));
-    query_ = query_ * scale;
+  auto core_attn_out = torch::zeros(
+      {batch_size, num_heads, sequence_length, v_head_dim}, value_.options());
+  torch::Tensor h;
 
-    auto core_attn_out =
-        torch::zeros({batch_size, num_heads, sequence_length, v_head_dim},
-                    value_.options());
-    torch::Tensor h;
+  if (initial_state.has_value() && initial_state.value().defined()) {
+    h = initial_state.value().to(torch::kFloat32).to(device).contiguous();
+  } else {
+    h = torch::zeros({batch_size, num_heads, k_head_dim, v_head_dim},
+                     value_.options());
+  }
 
-    if (initial_state.has_value() && initial_state.value().defined()) {
-        h = initial_state.value().to(torch::kFloat32).to(device).contiguous();
-    } else {
-        h = torch::zeros({batch_size, num_heads, k_head_dim, v_head_dim},
-                        value_.options());
-    }
+  for (int64_t i = 0; i < sequence_length; ++i) {
+    auto b_q = query_.select(2, i);
+    auto b_k = key_.select(2, i);
+    auto b_v = value_.select(2, i).clone();
+    auto b_g = g_.select(2, i).exp().unsqueeze(-1).unsqueeze(-1);
+    auto b_beta = beta_.select(2, i).unsqueeze(-1);
 
-    for (int64_t i = 0; i < sequence_length; ++i) {
-        auto b_q = query_.select(2, i);
-        auto b_k = key_.select(2, i);
-        auto b_v = value_.select(2, i).clone();
-        auto b_g = g_.select(2, i).exp().unsqueeze(-1).unsqueeze(-1);
-        auto b_beta = beta_.select(2, i).unsqueeze(-1);
+    // h = h.clone() * g.exp()[..., None, None]
+    h = h.clone() * b_g;
+    // b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
+    b_v = b_v - (h.clone() * b_k.unsqueeze(-1)).sum(-2);
+    // b_v = b_v * b_beta[..., None]
+    b_v = b_v * b_beta;
+    // h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
+    h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2);
+    // o[:,:,i] = einsum("bhd,bhdm->bhm", b_q, h)
+    core_attn_out.slice(2, i, i + 1) =
+        (b_q.unsqueeze(-1) * h).sum(-2).unsqueeze(2);
+  }
 
-        // h = h.clone() * g.exp()[..., None, None]
-        h = h.clone() * b_g;
-        // b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
-        b_v = b_v - (h.clone() * b_k.unsqueeze(-1)).sum(-2);
-        // b_v = b_v * b_beta[..., None]
-        b_v = b_v * b_beta;
-        // h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
-        h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2);
-        // o[:,:,i] = einsum("bhd,bhdm->bhm", b_q, h)
-        core_attn_out.slice(2, i, i + 1) =
-            (b_q.unsqueeze(-1) * h).sum(-2).unsqueeze(2);
-    }
+  if (!output_final_state) {
+    h = torch::Tensor();
+  }
 
-    if (!output_final_state) {
-        h = torch::Tensor();
-    }
-
-    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype);
-    return std::make_pair(core_attn_out, h);
+  core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype);
+  return std::make_pair(core_attn_out, h);
 }
 
 class TritonRecurrentGatedDeltaRuleTest : public ::testing::Test {
@@ -125,10 +123,13 @@ class TritonRecurrentGatedDeltaRuleTest : public ::testing::Test {
       torch::zeros({1}, torch::TensorOptions().device("npu:0"));
       torch_npu::init_npu("npu:" + std::to_string(kDeviceId));
       auto& reg = KernelRegistry::get_instance();
-      std::string binary_path = GetKernelBinaryPath("fused_recurrent_gated_delta_rule_fwd_kernel.npubin");
+      std::string binary_path = GetKernelBinaryPath(
+          "fused_recurrent_gated_delta_rule_fwd_kernel.npubin");
       npu_initialized_ =
-          reg.register_kernel("fused_recurrent_gated_delta_rule_fwd_kernel", binary_path) &&
-          reg.get_kernel_stub("fused_recurrent_gated_delta_rule_fwd_kernel") != nullptr;
+          reg.register_kernel("fused_recurrent_gated_delta_rule_fwd_kernel",
+                              binary_path) &&
+          reg.get_kernel_stub("fused_recurrent_gated_delta_rule_fwd_kernel") !=
+              nullptr;
     } catch (...) {
       npu_initialized_ = false;
     }
@@ -151,8 +152,9 @@ class TritonRecurrentGatedDeltaRuleTest : public ::testing::Test {
           torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCPU);
       return;
     }
-    tensor_options_ =
-        torch::TensorOptions().dtype(torch::kFloat16).device("npu:" + std::to_string(kDeviceId));
+    tensor_options_ = torch::TensorOptions()
+                          .dtype(torch::kFloat16)
+                          .device("npu:" + std::to_string(kDeviceId));
     torch::manual_seed(42);
     kernel_name_ = "fused_recurrent_gated_delta_rule_fwd_kernel";
     binary_filename_ = "fused_recurrent_gated_delta_rule_fwd_kernel.npubin";
@@ -204,16 +206,17 @@ TEST_P(TritonRecurrentGatedDeltaRuleParamTest, AccuracyMatch) {
   auto dtype = p.dtype;
   auto L = batch * T;
 
-  // Input generation aligned with Python: beta.sigmoid(), g = logsigmoid(rand)/gate_logit_normalizer
+  // Input generation aligned with Python: beta.sigmoid(), g =
+  // logsigmoid(rand)/gate_logit_normalizer
   auto q = torch::randn({batch, T, num_heads, k_head_dim}, dtype);
   auto k = torch::randn({batch, T, num_heads, k_head_dim}, dtype);
   auto v = torch::randn({batch, T, num_v_heads, v_head_dim}, dtype);
   auto beta = torch::rand({batch, T, num_v_heads}, dtype).sigmoid();
-  auto g =
-      torch::log_sigmoid(torch::rand({batch, T, num_v_heads}, torch::kFloat32)) /
-      gate_logit_normalizer;
-  auto initial_state =
-      torch::randn({batch, num_v_heads, k_head_dim, v_head_dim}, torch::kFloat32);
+  auto g = torch::log_sigmoid(
+               torch::rand({batch, T, num_v_heads}, torch::kFloat32)) /
+           gate_logit_normalizer;
+  auto initial_state = torch::randn(
+      {batch, num_v_heads, k_head_dim, v_head_dim}, torch::kFloat32);
 
   torch::Tensor q_expanded = q, k_expanded = k;
   if (num_v_heads / num_heads > 1) {
@@ -227,9 +230,15 @@ TEST_P(TritonRecurrentGatedDeltaRuleParamTest, AccuracyMatch) {
     k_expanded = l2norm(k_expanded, -1, 1e-6f);
   }
 
-  auto [golden_o, golden_state] = torch_recurrent_gated_delta_rule(
-      q_expanded, k_expanded, v, g, beta, initial_state, true,
-      std::optional<float>(scale_val));
+  auto [golden_o, golden_state] =
+      torch_recurrent_gated_delta_rule(q_expanded,
+                                       k_expanded,
+                                       v,
+                                       g,
+                                       beta,
+                                       initial_state,
+                                       true,
+                                       std::optional<float>(scale_val));
 
   auto q_d = q.reshape({1, L, num_heads, k_head_dim}).to(device);
   auto k_d = k.reshape({1, L, num_heads, k_head_dim}).to(device);
@@ -244,20 +253,31 @@ TEST_P(TritonRecurrentGatedDeltaRuleParamTest, AccuracyMatch) {
     culen.push_back(i * T);
   }
   auto cu_seqlens = torch::tensor(culen, torch::kInt64).to(device);
-  auto ssm_state_indices =
-      torch::arange(batch, torch::TensorOptions().dtype(torch::kInt32).device(device));
+  auto ssm_state_indices = torch::arange(
+      batch, torch::TensorOptions().dtype(torch::kInt32).device(device));
 
   auto npu_stream = c10_npu::getCurrentNPUStream(kDeviceId);
-  auto [o_d, state_d] = npu_fused_recurrent_gated_delta_rule(
-      q_d, k_d, v_d, g_d, beta_d, scale_val, init_d, true, cu_seqlens,
-      ssm_state_indices, std::nullopt, use_qk_l2norm_in_kernel);
+  auto [o_d, state_d] =
+      npu_fused_recurrent_gated_delta_rule(q_d,
+                                           k_d,
+                                           v_d,
+                                           g_d,
+                                           beta_d,
+                                           scale_val,
+                                           init_d,
+                                           true,
+                                           cu_seqlens,
+                                           ssm_state_indices,
+                                           std::nullopt,
+                                           use_qk_l2norm_in_kernel);
   aclrtSynchronizeStream(npu_stream.stream());
 
   auto o = o_d.cpu().reshape(golden_o.sizes());
   auto state = state_d.cpu();
 
   // rtol=0.005, atol=0.01 for output
-  auto output_diff = (golden_o.to(torch::kFloat32) - o.to(torch::kFloat32)).abs();
+  auto output_diff =
+      (golden_o.to(torch::kFloat32) - o.to(torch::kFloat32)).abs();
   auto output_max_diff = output_diff.max().item<float>();
   EXPECT_LT(output_max_diff, kOutputAtol)
       << "Output mismatch: max diff = " << output_max_diff
@@ -273,7 +293,8 @@ TEST_P(TritonRecurrentGatedDeltaRuleParamTest, AccuracyMatch) {
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    RecurrentParams, TritonRecurrentGatedDeltaRuleParamTest,
+    RecurrentParams,
+    TritonRecurrentGatedDeltaRuleParamTest,
     ::testing::Values(
         RecurrentTestParam{1, 1, 4, 8, 128, 0.5f, 0.1f, torch::kBFloat16},
         RecurrentTestParam{2, 1, 4, 8, 128, 0.5f, 1.0f, torch::kBFloat16},
@@ -307,5 +328,3 @@ int main(int argc, char** argv) {
   int result = RUN_ALL_TESTS();
   return result;
 }
-
-

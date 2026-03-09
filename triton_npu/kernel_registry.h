@@ -27,23 +27,30 @@ extern "C" {
 #endif
 // rt kernel
 typedef struct {
-    uint32_t magic{0};
-    uint32_t version{0};
-    const void *data{nullptr};
-    uint64_t length{0};
+  uint32_t magic{0};
+  uint32_t version{0};
+  const void* data{nullptr};
+  uint64_t length{0};
 } RtDevBinaryT;
 
-typedef void *rtStream_t;
+typedef void* rtStream_t;
 typedef int32_t rtError_t;
 
-int rtFunctionRegister(void *binHandle, const void *subFunc, const char *stubName,
-                       const void *kernelInfoExt, uint32_t funcMode);
-int rtDevBinaryRegister(const RtDevBinaryT *bin, void **hdl);
-int rtDevBinaryUnRegister(void *hdl);
-int rtKernelLaunch(const void *stubFunc, uint32_t blockDim, void *args, uint32_t argsSize,
-                   void *smDesc, rtStream_t sm);
+int rtFunctionRegister(void* binHandle,
+                       const void* subFunc,
+                       const char* stubName,
+                       const void* kernelInfoExt,
+                       uint32_t funcMode);
+int rtDevBinaryRegister(const RtDevBinaryT* bin, void** hdl);
+int rtDevBinaryUnRegister(void* hdl);
+int rtKernelLaunch(const void* stubFunc,
+                   uint32_t blockDim,
+                   void* args,
+                   uint32_t argsSize,
+                   void* smDesc,
+                   rtStream_t sm);
 // rt other
-int rtGetC2cCtrlAddr(uint64_t *addr, uint32_t *len);
+int rtGetC2cCtrlAddr(uint64_t* addr, uint32_t* len);
 
 constexpr uint32_t RT_DEV_BINARY_MAGIC_ELF_AICUBE = 0x41494343U;
 constexpr uint32_t RT_DEV_BINARY_MAGIC_ELF_AIVEC = 0x41415246U;
@@ -93,9 +100,9 @@ class KernelRegistry {
 
   struct KernelInfo {
     std::string name;
-    char* buffer = nullptr;           // binary buffer
+    char* buffer = nullptr;                // binary buffer
     KernelStubHandle stub_func = nullptr;  // rtFunctionRegister funcstub handle
-    void* bin_handle = nullptr;       // binary bin handle
+    void* bin_handle = nullptr;            // binary bin handle
     std::string persistent_func_name;
     std::string mix_mode;
     int64_t workspace_size;
@@ -104,12 +111,9 @@ class KernelRegistry {
   };
 
   char* load_binary_file(const std::string& file_path, uint32_t& file_size);
-  bool register_binary(KernelInfo& info,
-                       uint32_t binary_size);
+  bool register_binary(KernelInfo& info, uint32_t binary_size);
 
   std::unordered_map<std::string, KernelInfo> kernel_infos_;
 };
 
 }  // namespace xllm::kernel::npu
-
-
