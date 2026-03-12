@@ -2,12 +2,13 @@ import torch
 import triton
 import torch_npu
 import triton.language as tl
-import torch.nn.functional as F
 import pytest
 
-# current for qwen3-next TP4 num_v_head(NUM_HEADS) is 8
-@triton.jit
-def fused_gdn_gating_head8_kernel(
+NUM_HEADS_TEST_CASES = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32)
+
+
+@triton.jit(do_not_specialize=["num_heads"])
+def fused_gdn_gating_decode_kernel(
     g,
     beta_output,
     A_log,
@@ -15,15 +16,15 @@ def fused_gdn_gating_head8_kernel(
     b,
     dt_bias,
     seq_len,
-    NUM_HEADS: tl.constexpr,
+    num_heads,
     beta: tl.constexpr,
     threshold: tl.constexpr,
     BLK_HEADS: tl.constexpr,
 ):
     i_b, i_s, i_d = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     head_off = i_d * BLK_HEADS + tl.arange(0, BLK_HEADS)
-    off = i_b * seq_len * NUM_HEADS + i_s * NUM_HEADS + head_off
-    mask = head_off < NUM_HEADS
+    off = i_b * seq_len * num_heads + i_s * num_heads + head_off
+    mask = head_off < num_heads
     blk_A_log = tl.load(A_log + head_off, mask=mask)
     blk_a = tl.load(a + off, mask=mask)
     blk_b = tl.load(b + off, mask=mask)
@@ -74,7 +75,7 @@ def fused_gdn_gating(
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
     beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
-    fused_gdn_gating_head8_kernel[grid](
+    fused_gdn_gating_decode_kernel[grid](
         g,
         beta_output,
         A_log,
@@ -93,7 +94,8 @@ def fused_gdn_gating(
 # default params is for qwen3-next tp4
 @pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("itype", [torch.bfloat16])
-def test_gdn_gating(num_tokens, itype, num_v_heads = 8):
+@pytest.mark.parametrize("num_v_heads", NUM_HEADS_TEST_CASES)
+def test_gdn_gating(num_tokens, itype, num_v_heads):
     A_log = torch.randn((num_v_heads), dtype = torch.float32)
     a = torch.randn((num_tokens, num_v_heads), dtype = itype)
     b = torch.randn((num_tokens, num_v_heads), dtype = itype)
@@ -106,6 +108,3 @@ def test_gdn_gating(num_tokens, itype, num_v_heads = 8):
 
 if __name__ == '__main__':
     pass
-    # test_op(3)
-
-

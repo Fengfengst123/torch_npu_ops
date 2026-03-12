@@ -37,7 +37,7 @@ class OperationFactory final {
   }
 
   FusedGdnGatingOp& fused_gdn_gating() {
-    return get_or_create<FusedGdnGatingOp>("fused_gdn_gating_head8_kernel");
+    return get_or_create<FusedGdnGatingOp>("fused_gdn_gating_decode_kernel");
   }
 
   LayerNormFwdOp& layer_norm_fwd() {

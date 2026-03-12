@@ -29,7 +29,7 @@ class RopeInplaceOp final : public OperationBase {
 
 class FusedGdnGatingOp final : public OperationBase {
  public:
-  FusedGdnGatingOp() : OperationBase("fused_gdn_gating_head8_kernel") {}
+  FusedGdnGatingOp() : OperationBase("fused_gdn_gating_decode_kernel") {}
 };
 
 class LayerNormFwdOp final : public OperationBase {

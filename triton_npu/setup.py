@@ -92,7 +92,7 @@ def validate_and_copy_kernels(
             for npubin_file, json_file in files:
                 print(f"  - {npubin_file}")
             sys.exit(1)
-        
+
         npubin_file, json_file = files[0]
         npubin_path = Path(npubin_file)
         json_path = Path(json_file)
@@ -152,4 +152,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

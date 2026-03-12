@@ -20,6 +20,8 @@
 #include <torch/torch.h>
 #include <torch_npu/torch_npu.h>
 
+#include <array>
+
 #include "kernel_registry.h"
 #include "test/test_utils.h"
 #include "torch_api/triton_ops_api.h"
@@ -29,7 +31,8 @@ namespace xllm::kernel::npu {
 
 constexpr float kTolerance = 1e-3f;
 constexpr int32_t kDeviceId = 0;
-constexpr int32_t g_num_v_heads = 32;
+constexpr std::array<int64_t, 10> kNumHeadsTestCases =
+    {1, 2, 3, 4, 6, 8, 12, 16, 24, 32};
 
 std::pair<torch::Tensor, torch::Tensor> torch_fused_gdn_gating(
     const torch::Tensor& A_log,
@@ -73,15 +76,16 @@ class TritonFusedGdnGatingTest : public ::testing::Test {
       return;
     }
 
-    kernel_name_ = "fused_gdn_gating_head8_kernel";
-    binary_filename_ = "fused_gdn_gating_head8_kernel.npubin";
+    kernel_name_ = "fused_gdn_gating_decode_kernel";
+    binary_filename_ = "fused_gdn_gating_decode_kernel.npubin";
 
     torch::manual_seed(42);
     torch_npu::init_npu(device_str_);
 
     binary_path_ = GetKernelBinaryPath(binary_filename_);
     auto& reg = KernelRegistry::get_instance();
-    ASSERT_TRUE(reg.register_kernel(kernel_name_, binary_path_))
+    ASSERT_TRUE(reg.register_kernel(kernel_name_, binary_path_) ||
+                reg.is_kernel_registered(kernel_name_))
         << "Failed to register kernel: " << kernel_name_ << " from "
         << binary_path_;
     ASSERT_NE(reg.get_kernel_stub(kernel_name_), nullptr)
@@ -105,56 +109,57 @@ class TritonFusedGdnGatingTest : public ::testing::Test {
   std::string binary_path_;
 };
 
-TEST_F(TritonFusedGdnGatingTest, Head8KernelTest) {
+TEST_F(TritonFusedGdnGatingTest, DecodeKernelTest) {
   if (!npu_available_) {
     GTEST_SKIP() << "NPU device not available";
   }
 
   auto device = at::Device(device_str_);
   constexpr int64_t num_tokens = 3;
-  constexpr int64_t tp = 4;
-  constexpr int64_t num_heads = g_num_v_heads / tp;
   constexpr float beta = 1.0f;
   constexpr float threshold = 20.0f;
 
-  auto A_log = torch::randn(
-      {num_heads},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device));
-  auto a = torch::randn(
-      {num_tokens, num_heads},
-      torch::TensorOptions().dtype(torch::kBFloat16).device(device));
-  auto b = torch::randn(
-      {num_tokens, num_heads},
-      torch::TensorOptions().dtype(torch::kBFloat16).device(device));
-  auto dt_bias = torch::randn(
-      {num_heads},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device));
+  for (int64_t num_heads : kNumHeadsTestCases) {
+    auto A_log = torch::randn(
+        {num_heads},
+        torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    auto a = torch::randn(
+        {num_tokens, num_heads},
+        torch::TensorOptions().dtype(torch::kBFloat16).device(device));
+    auto b = torch::randn(
+        {num_tokens, num_heads},
+        torch::TensorOptions().dtype(torch::kBFloat16).device(device));
+    auto dt_bias = torch::randn(
+        {num_heads},
+        torch::TensorOptions().dtype(torch::kFloat32).device(device));
 
-  auto A_log_cpu = A_log.cpu();
-  auto a_cpu = a.cpu();
-  auto b_cpu = b.cpu();
-  auto dt_bias_cpu = dt_bias.cpu();
-  auto [torch_g, torch_beta] = torch_fused_gdn_gating(
-      A_log_cpu, a_cpu, b_cpu, dt_bias_cpu, beta, threshold);
+    auto A_log_cpu = A_log.cpu();
+    auto a_cpu = a.cpu();
+    auto b_cpu = b.cpu();
+    auto dt_bias_cpu = dt_bias.cpu();
+    auto [torch_g, torch_beta] = torch_fused_gdn_gating(
+        A_log_cpu, a_cpu, b_cpu, dt_bias_cpu, beta, threshold);
 
-  auto npu_stream = c10_npu::getCurrentNPUStream(0);
-  auto [triton_g, triton_beta] =
-      npu_fused_gdn_gating(A_log, a, b, dt_bias, beta, threshold);
-  aclrtSynchronizeStream(npu_stream.stream());
+    auto npu_stream = c10_npu::getCurrentNPUStream(0);
+    auto [triton_g, triton_beta] =
+        npu_fused_gdn_gating(A_log, a, b, dt_bias, beta, threshold);
+    aclrtSynchronizeStream(npu_stream.stream());
 
-  auto triton_g_cpu = triton_g.cpu();
-  auto triton_beta_cpu = triton_beta.cpu();
+    auto triton_g_cpu = triton_g.cpu();
+    auto triton_beta_cpu = triton_beta.cpu();
 
-  auto g_diff = torch::abs(torch_g - triton_g_cpu);
-  float g_max_diff = torch::max(g_diff).item<float>();
-  EXPECT_LT(g_max_diff, kTolerance) << "g: max diff (" << g_max_diff
-                                    << ") > tolerance (" << kTolerance << ")";
+    auto g_diff = torch::abs(torch_g - triton_g_cpu);
+    float g_max_diff = torch::max(g_diff).item<float>();
+    EXPECT_LT(g_max_diff, kTolerance)
+        << "g: max diff (" << g_max_diff << ") > tolerance (" << kTolerance
+        << ") for num_heads=" << num_heads;
 
-  auto beta_diff = torch::abs(torch_beta - triton_beta_cpu);
-  float beta_max_diff = torch::max(beta_diff).item<float>();
-  EXPECT_LT(beta_max_diff, kTolerance)
-      << "beta: max diff (" << beta_max_diff << ") > tolerance (" << kTolerance
-      << ")";
+    auto beta_diff = torch::abs(torch_beta - triton_beta_cpu);
+    float beta_max_diff = torch::max(beta_diff).item<float>();
+    EXPECT_LT(beta_max_diff, kTolerance)
+        << "beta: max diff (" << beta_max_diff << ") > tolerance ("
+        << kTolerance << ") for num_heads=" << num_heads;
+  }
 }
 
 }  // namespace xllm::kernel::npu

@@ -44,7 +44,6 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
 
   TORCH_CHECK(A_log.dtype() == torch::kFloat32, "A_log must be float32");
   TORCH_CHECK(dt_bias.dtype() == torch::kFloat32, "dt_bias must be float32");
-
   TORCH_CHECK(A_log.dim() == 1, "A_log must be 1D tensor");
   TORCH_CHECK(a.dim() == 2, "a must be 2D tensor (batch, num_heads)");
   TORCH_CHECK(b.dim() == 2, "b must be 2D tensor (batch, num_heads)");
@@ -76,14 +75,19 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
   void* aPtr = a.data_ptr();
   void* bPtr = b.data_ptr();
   void* dtBiasPtr = dt_bias.data_ptr();
+  int32_t numHeads = static_cast<int32_t>(num_heads);
 
   auto& op = OperationFactory::instance().fused_gdn_gating();
   auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+    // Keep the launch payload aligned with the AOT kernel ABI: only tensor
+    // pointers and the runtime numHeads scalar belong here. Adding seq_len
+    // shifts the trailing gridX/Y/Z fields and breaks multi-block launches
+    // for num_heads > 8.
     ab.constructArgs(
-        gPtr, betaOutputPtr, ALogPtr, aPtr, bPtr, dtBiasPtr, seq_len);
+        gPtr, betaOutputPtr, ALogPtr, aPtr, bPtr, dtBiasPtr, numHeads);
   });
   if (ret != RT_ERROR_NONE) {
-    LOG(ERROR) << "rtKernelLaunch failed for 'fused_gdn_gating_head8_kernel': "
+    LOG(ERROR) << "rtKernelLaunch failed for 'fused_gdn_gating_decode_kernel': "
                << ret;
   }
   return std::make_pair(g, beta_output);
