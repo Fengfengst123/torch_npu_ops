@@ -25,6 +25,7 @@ set(TRITON_NPU_API_SRCS
   triton_npu/torch_api/npu_triton_layernorm_fwd.cpp
   triton_npu/torch_api/npu_triton_causal_conv1d_update.cpp
   triton_npu/torch_api/npu_triton_recurrent_gated_delta_rule.cpp
+  triton_npu/torch_api/npu_triton_fused_qkvzba_split_reshape.cpp
 )
 
 cc_library(

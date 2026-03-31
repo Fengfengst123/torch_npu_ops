@@ -59,6 +59,11 @@ class OperationFactory final {
         "_causal_conv1d_update_qwen_decode_kernel");
   }
 
+  FusedQkvzbaSplitReshapeOp& fused_qkvzba_split_reshape() {
+    return get_or_create<FusedQkvzbaSplitReshapeOp>(
+        "fused_qkvzba_split_reshape_cat_kernel");
+  }
+
  private:
   OperationFactory() = default;
 

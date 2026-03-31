@@ -80,4 +80,13 @@ torch::Tensor npu_causal_conv1d_update(
     int32_t pad_slot_id = -1,
     bool validate_data = false);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+npu_fused_qkvzba_split_reshape_cat(
+    torch::Tensor& mixed_qkvz,
+    torch::Tensor& mixed_ba,
+    int32_t num_heads_qk,
+    int32_t num_heads_v,
+    int32_t head_qk,
+    int32_t head_v);
+
 }  // namespace xllm::kernel::npu

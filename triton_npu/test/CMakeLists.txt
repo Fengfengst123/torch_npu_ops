@@ -67,6 +67,18 @@ cc_test(
     torch_npu
 )
 
+cc_test(
+  NAME
+    fused_qkvzba_split_reshape_test
+  SRCS
+    triton_fused_qkvzba_split_reshape_test.cpp
+  DEPS
+    GTest::gtest
+    GTest::gtest_main
+    triton_adapter
+    torch
+    torch_npu
+)
 
 target_compile_definitions(fused_recurrent_gated_delta_rule_test PRIVATE
   TEST_BINARY_DIR="${BINARY_DIR}"
@@ -86,5 +98,9 @@ target_compile_definitions(causal_conv1d_update_test PRIVATE
 )
 
 target_compile_definitions(rope_inplace_test PRIVATE
+  TEST_BINARY_DIR="${BINARY_DIR}"
+)
+
+target_compile_definitions(fused_qkvzba_split_reshape_test PRIVATE
   TEST_BINARY_DIR="${BINARY_DIR}"
 )

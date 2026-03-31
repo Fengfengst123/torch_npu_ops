@@ -55,4 +55,10 @@ class CausalConv1dUpdateQwenDecodeOp final : public OperationBase {
       : OperationBase("_causal_conv1d_update_qwen_decode_kernel") {}
 };
 
+class FusedQkvzbaSplitReshapeOp final : public OperationBase {
+ public:
+  FusedQkvzbaSplitReshapeOp()
+      : OperationBase("fused_qkvzba_split_reshape_cat_kernel") {}
+};
+
 }  // namespace xllm::kernel::npu
