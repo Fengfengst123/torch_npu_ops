@@ -24,7 +24,7 @@ def get_vectorcore_num() -> int:
 # Triton kernel (migrated from vllm-ascend PR #6740)
 # Uses do_not_specialize for total_rows / rows_per_vec so that a single
 # binary can serve any batch size > 65535.
-@triton.jit(do_not_specialize=["total_rows", "rows_per_vec", "rows_per_iter",
+@triton.jit(do_not_specialize=["total_rows", "rows_per_vec",
                                 "num_heads_qk", "num_heads_v",
                                 "qkvz_row_stride", "ba_row_stride",
                                 "qkv_row_stride", "z_row_stride",
@@ -39,6 +39,14 @@ def fused_qkvzba_split_reshape_cat_kernel(
     # Runtime (do_not_specialize) – will not be folded as constants
     num_heads_qk,
     num_heads_v,
+    total_rows,
+    rows_per_vec,
+    qkvz_row_stride,
+    ba_row_stride,
+    qkv_row_stride,
+    z_row_stride,
+    ba_out_row_stride,
+    # tl.constexpr parameters (must be at the end)
     HEAD_QK: tl.constexpr,          # architectural constant, safe to fold
     HEAD_V: tl.constexpr,           # architectural constant, safe to fold
     # Pre-computed from num_heads_* in wrapper; kept constexpr for tl.arange
@@ -46,14 +54,7 @@ def fused_qkvzba_split_reshape_cat_kernel(
     V_DIM_PER_QK: tl.constexpr,     # = V_HEADS_PER_QK * HEAD_V
     QKVZ_DIM_T: tl.constexpr,       # = HEAD_QK * 2 + V_DIM_PER_QK * 2
     BA_DIM_T: tl.constexpr,         # = V_HEADS_PER_QK * 2
-    total_rows,
-    rows_per_vec,
-    rows_per_iter,                  
-    qkvz_row_stride,
-    ba_row_stride,
-    qkv_row_stride,
-    z_row_stride,
-    ba_out_row_stride,
+    ROWS_PER_ITER: tl.constexpr,
 ):
     vec_id = tl.program_id(0)
 
@@ -63,11 +64,11 @@ def fused_qkvzba_split_reshape_cat_kernel(
     row_offset = row_start
 
     # rows_per_iter is always 1; iter_count drives the outer loop.
-    iter_count = (row_end - row_start + rows_per_iter - 1) // rows_per_iter
+    iter_count = (row_end - row_start + ROWS_PER_ITER - 1) // ROWS_PER_ITER
 
     for _ in tl.range(iter_count):
         # rows_per_iter == 1 → tl.arange(0, 1): single-row tile
-        row_indices = tl.arange(0, 1) + row_offset
+        row_indices = tl.arange(0, ROWS_PER_ITER) + row_offset
         row_mask = row_indices < row_end
 
         # tl.range (runtime loop) because num_heads_qk is do_not_specialize
@@ -115,7 +116,7 @@ def fused_qkvzba_split_reshape_cat_kernel(
             a_data = tl.load(mixed_ba + a_src, mask=row_mask[:, None])
             tl.store(a + b_dst, a_data, mask=row_mask[:, None])
 
-        row_offset += rows_per_iter
+        row_offset += ROWS_PER_ITER
 
 
 # ---------------------------------------------------------------------------
@@ -184,20 +185,20 @@ def fused_qkvzba_split_reshape_cat(
         mixed_ba,
         num_heads_qk,
         num_heads_v,
-        head_qk,
-        head_v,
-        v_heads_per_qk,     
-        v_dim_per_qk,     
-        head_qk * 2 + v_dim_per_qk * 2,  # QKVZ_DIM_T
-        v_heads_per_qk * 2,              # BA_DIM_T
         total_rows,
         rows_per_vec,
-        rows_per_iter,
         qkvz_row_stride,
         ba_row_stride,
         qkv_row_stride,
         z_row_stride,
         ba_out_row_stride,
+        head_qk,
+        head_v,
+        v_heads_per_qk,
+        v_dim_per_qk,
+        head_qk * 2 + v_dim_per_qk * 2,  # QKVZ_DIM_T
+        v_heads_per_qk * 2,              # BA_DIM_T
+        rows_per_iter,
     )
 
     # Reshape z from [batch, num_heads_v * head_v] to [batch, num_heads_v, head_v]

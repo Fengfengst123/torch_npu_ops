@@ -46,13 +46,6 @@ static inline int32_t next_pow2(int32_t n) {
 // Triton kernels run on Vector Cores (not AI Cores / cube units).
 // Uses aclrtGetDeviceInfo() with ACL_DEV_ATTR_VECTOR_CORE_NUM (= 201),
 // defined in acl/acl_rt.h since CANN 8.x.
-//
-// Verified on Ascend 910B3:
-//   ACL_DEV_ATTR_AICORE_CORE_NUM  (101) = 24  (cube compute cores)
-//   ACL_DEV_ATTR_VECTOR_CORE_NUM  (201) = 48  (vector compute cores)
-// Triton grid_size should be capped to the Vector Core count (48).
-//
-// Falls back to 20 when the call fails (no device context, old CANN, etc.).
 // ---------------------------------------------------------------------------
 static int32_t get_vectorcore_num() {
   int32_t device_id = 0;
@@ -69,10 +62,6 @@ static int32_t get_vectorcore_num() {
   }
   return 20;  // fallback for older CANN versions or unsupported attribute
 }
-
-// ---------------------------------------------------------------------------
-// Public C++ interface
-// ---------------------------------------------------------------------------
 
 /**
  * npu_fused_qkvzba_split_reshape_cat
@@ -142,16 +131,7 @@ npu_fused_qkvzba_split_reshape_cat(
   const int32_t grid_size = std::max(1, std::min(num_vectorcore, total_rows));
   const int32_t rows_per_vec = ceil_div(total_rows, grid_size);
 
-  // UB tile-size heuristic: fill at most 85 KB worth of elements per iter
-  const int32_t ub_size =
-      85 * 1024 / static_cast<int32_t>(mixed_qkvz.element_size());
-  const int32_t elements_per_row = qkvz_row_stride + ba_row_stride +
-                                   qkv_row_stride + z_row_stride +
-                                   ba_out_row_stride * 2;
-  int32_t rows_per_iter =
-      (elements_per_row > 0) ? std::max(1, ub_size / elements_per_row) : 1;
-  rows_per_iter = next_pow2(rows_per_iter);
-  rows_per_iter = std::min({rows_per_iter, rows_per_vec, 64});
+  const int32_t rows_per_iter = 1;
 
   // -----------------------------------------------------------------------
   // Launch kernel
@@ -165,17 +145,14 @@ npu_fused_qkvzba_split_reshape_cat(
 
   auto& op = OperationFactory::instance().fused_qkvzba_split_reshape();
   auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
-    // Argument order must match the Triton kernel signature exactly.
-    // Kernel signature (after refactoring for do_not_specialize):
+    // Kernel signature (after moving tl.constexpr to the end):
     //   output ptrs:  mixed_qkv, z, b, a
     //   input ptrs:   mixed_qkvz, mixed_ba
-    //   do_not_specialize: num_heads_qk, num_heads_v
-    //   tl.constexpr: HEAD_QK, HEAD_V
-    //   tl.constexpr (pre-computed): V_HEADS_PER_QK, V_DIM_PER_QK,
-    //                                QKVZ_DIM_T, BA_DIM_T
-    //   do_not_specialize: total_rows, rows_per_vec, rows_per_iter,
+    //   do_not_specialize: num_heads_qk, num_heads_v, total_rows, rows_per_vec,
     //                      qkvz_row_stride, ba_row_stride, qkv_row_stride,
     //                      z_row_stride, ba_out_row_stride
+    //   tl.constexpr: HEAD_QK, HEAD_V, V_HEADS_PER_QK, V_DIM_PER_QK,
+    //                 QKVZ_DIM_T, BA_DIM_T, ROWS_PER_ITER
     ab.constructArgs(
         mixed_qkv.data_ptr(),
         z_flat.data_ptr(),
@@ -183,21 +160,10 @@ npu_fused_qkvzba_split_reshape_cat(
         a.data_ptr(),
         mixed_qkvz.data_ptr(),
         mixed_ba.data_ptr(),
-        // do_not_specialize: head counts (may vary per TP config)
         num_heads_qk,
         num_heads_v,
-        // tl.constexpr: architectural head dims
-        head_qk,
-        head_v,
-        // tl.constexpr: pre-computed from head counts for tl.arange
-        v_heads_per_qk,                            // V_HEADS_PER_QK
-        v_dim_per_qk,                              // V_DIM_PER_QK
-        head_qk * 2 + v_dim_per_qk * 2,           // QKVZ_DIM_T
-        v_heads_per_qk * 2,                        // BA_DIM_T
-        // do_not_specialize: runtime scalars
         total_rows,
         rows_per_vec,
-        rows_per_iter,
         qkvz_row_stride,
         ba_row_stride,
         qkv_row_stride,
@@ -211,7 +177,6 @@ npu_fused_qkvzba_split_reshape_cat(
                << ret;
   }
 
-  // Reshape z: [batch, num_heads_v * head_v] -> [batch, num_heads_v, head_v]
   auto z = z_flat.view({total_rows, num_heads_v, head_v});
 
   return {mixed_qkv, z, b, a};

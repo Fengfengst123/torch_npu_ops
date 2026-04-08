@@ -96,4 +96,10 @@ target_compile_definitions(torch_npu_kernels PRIVATE
   TORCH_NPU_KERNELS_VERSION="1.0.0"
 )
 
+# Add ascendc_npu subdirectory (if it exists)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ascendc_npu)
+  add_subdirectory(ascendc_npu)
+endif()
+
+
 add_subdirectory(triton_npu/test)

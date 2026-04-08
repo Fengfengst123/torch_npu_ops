@@ -234,7 +234,10 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(4, 16, 32, 128, 128),
         std::make_tuple(8, 16, 32, 128, 128),
         // Larger batches to exercise >65535-token code path
-        std::make_tuple(128,  8, 16, 128, 128),
+        std::make_tuple(4096,  2,  4, 128, 128),
+        std::make_tuple(4096,  4,  8, 128, 128),
+        std::make_tuple(4096,  8,  16, 128, 128),
+        std::make_tuple(4096, 16,  32, 128, 128),
         std::make_tuple(256,  8, 16, 128, 128)));
 
 }  // namespace xllm::kernel::npu
