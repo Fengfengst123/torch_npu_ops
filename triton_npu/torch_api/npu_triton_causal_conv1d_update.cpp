@@ -35,6 +35,8 @@ torch::Tensor npu_causal_conv1d_update(
     bool validate_data) {
   (void)max_query_len;
   (void)validate_data;
+  (void)activation;
+  (void)intermediate_conv_window;
 
   if (query_start_loc.has_value()) {
     LOG(ERROR)

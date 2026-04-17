@@ -31,6 +31,10 @@ class OperationFactory final {
     return inst;
   }
 
+  L2NormFwdOp& l2norm_fwd() {
+    return get_or_create<L2NormFwdOp>("l2norm_fwd_kernel2_loop");
+  }
+
   RopeInplaceOp& rope_inplace() {
     // input param is key for OperationFactory
     return get_or_create<RopeInplaceOp>("rope_inplace_kernel");
@@ -49,6 +53,38 @@ class OperationFactory final {
         "fused_recurrent_gated_delta_rule_fwd_kernel");
   }
 
+  ChunkGatedDeltaRuleFwdHOp& chunk_gated_delta_rule_fwd_h() {
+    return get_or_create<ChunkGatedDeltaRuleFwdHOp>(
+        "chunk_gated_delta_rule_fwd_kernel_h_blockdim64");
+  }
+
+  ChunkLocalCumsumScalarOp& chunk_local_cumsum_scalar() {
+    return get_or_create<ChunkLocalCumsumScalarOp>(
+        "chunk_local_cumsum_scalar_kernel");
+  }
+
+  ChunkScaledDotKktFwdOp& chunk_scaled_dot_kkt_fwd() {
+    return get_or_create<ChunkScaledDotKktFwdOp>(
+        "chunk_scaled_dot_kkt_fwd_kernel");
+  }
+
+  SolveTril16x16Op& solve_tril_16x16() {
+    return get_or_create<SolveTril16x16Op>("solve_tril_16x16_kernel");
+  }
+
+  Merge16x16To64x64InverseOp& merge_16x16_to_64x64_inverse() {
+    return get_or_create<Merge16x16To64x64InverseOp>(
+        "merge_16x16_to_64x64_inverse_kernel");
+  }
+
+  RecomputeWUForwardOp& recompute_w_u_fwd() {
+    return get_or_create<RecomputeWUForwardOp>("recompute_w_u_fwd_kernel");
+  }
+
+  ChunkForwardOOp& chunk_fwd_o() {
+    return get_or_create<ChunkForwardOOp>("chunk_fwd_kernel_o");
+  }
+
   CausalConv1dUpdateNoCacheNoMtpOp& causal_conv1d_update_no_cache_no_mtp() {
     return get_or_create<CausalConv1dUpdateNoCacheNoMtpOp>(
         "_causal_conv1d_update_kernel_no_cache_len_no_mtp");
@@ -57,6 +93,11 @@ class OperationFactory final {
   CausalConv1dUpdateQwenDecodeOp& causal_conv1d_update_qwen_decode() {
     return get_or_create<CausalConv1dUpdateQwenDecodeOp>(
         "_causal_conv1d_update_qwen_decode_kernel");
+  }
+
+  CausalConv1dUpdateTiledV2Op& causal_conv1d_update_tiled_v2() {
+    return get_or_create<CausalConv1dUpdateTiledV2Op>(
+        "_causal_conv1d_update_kernel_npu_tiled_v2");
   }
 
   FusedQkvzbaSplitReshapeOp& fused_qkvzba_split_reshape() {

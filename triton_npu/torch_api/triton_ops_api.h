@@ -28,6 +28,10 @@
 
 namespace xllm::kernel::npu {
 
+torch::Tensor npu_l2norm_last_dim(
+    torch::Tensor& x,
+    double eps = 1e-6);
+
 void rope_inplace(torch::Tensor& x,
                   torch::Tensor& sin,
                   torch::Tensor& cos,
@@ -55,6 +59,32 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
     const std::optional<torch::Tensor>& num_accepted_tokens = std::nullopt,
     bool use_qk_l2norm_in_kernel = false);
 
+std::pair<torch::Tensor, torch::Tensor> npu_chunk_gated_delta_rule(
+    torch::Tensor& q,
+    torch::Tensor& k,
+    torch::Tensor& v,
+    torch::Tensor& g,
+    torch::Tensor& beta,
+    const std::optional<float>& scale = std::nullopt,
+    const std::optional<torch::Tensor>& initial_state = std::nullopt,
+    bool output_final_state = false,
+    const std::optional<torch::Tensor>& cu_seqlens = std::nullopt,
+    bool head_first = false,
+    bool use_qk_l2norm_in_kernel = false);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+npu_chunk_gated_delta_rule_fwd_h(
+    torch::Tensor& k,
+    torch::Tensor& w,
+    torch::Tensor& u,
+    const std::optional<torch::Tensor>& g = std::nullopt,
+    const std::optional<torch::Tensor>& initial_state = std::nullopt,
+    bool output_final_state = false,
+    int64_t chunk_size = 64,
+    bool save_new_value = true,
+    const std::optional<torch::Tensor>& cu_seqlens = std::nullopt,
+    const std::optional<torch::Tensor>& chunk_offsets = std::nullopt);
+
 torch::Tensor layer_norm_fwd(
     torch::Tensor& x,
     torch::Tensor& weight,
@@ -78,6 +108,21 @@ torch::Tensor npu_causal_conv1d_update(
     int32_t max_query_len = -1,
     const std::optional<torch::Tensor>& intermediate_conv_window = std::nullopt,
     int32_t pad_slot_id = -1,
+    bool validate_data = false);
+
+torch::Tensor npu_causal_conv1d_update_v2(
+    torch::Tensor& x,
+    torch::Tensor& conv_state,
+    torch::Tensor& weight,
+    bool activation = true,
+    const std::optional<torch::Tensor>& bias = std::nullopt,
+    const std::optional<torch::Tensor>& conv_state_indices = std::nullopt,
+    const std::optional<torch::Tensor>& query_start_loc = std::nullopt,
+    int32_t max_query_len = -1,
+    int32_t pad_slot_id = -1,
+    const std::optional<torch::Tensor>& block_idx_last_scheduled_token =
+        std::nullopt,
+    const std::optional<torch::Tensor>& initial_state_idx = std::nullopt,
     bool validate_data = false);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>

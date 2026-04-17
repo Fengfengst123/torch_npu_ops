@@ -4,6 +4,19 @@ set(BINARY_DIR "${TRITON_BIN_PATH}")
 
 cc_test(
   NAME
+    l2norm_test
+  SRCS
+    triton_l2norm_test.cpp
+  DEPS
+    GTest::gtest
+    GTest::gtest_main
+    triton_adapter
+    torch
+    torch_npu
+)
+
+cc_test(
+  NAME
     rope_inplace_test
   SRCS
     triton_rope_inplace_test.cpp
@@ -43,6 +56,19 @@ cc_test(
 
 cc_test(
   NAME
+    chunk_gated_delta_rule_test
+  SRCS
+    triton_chunk_gated_delta_rule_test.cpp
+  DEPS
+    GTest::gtest
+    GTest::gtest_main
+    triton_adapter
+    torch
+    torch_npu
+)
+
+cc_test(
+  NAME
     layer_norm_fwd_test
   SRCS
     triton_layernorm_fwd_test.cpp
@@ -69,6 +95,19 @@ cc_test(
 
 cc_test(
   NAME
+    causal_conv1d_update_v2_test
+  SRCS
+    triton_causal_conv1d_update_v2_test.cpp
+  DEPS
+    GTest::gtest
+    GTest::gtest_main
+    triton_adapter
+    torch
+    torch_npu
+)
+
+cc_test(
+  NAME
     fused_qkvzba_split_reshape_test
   SRCS
     triton_fused_qkvzba_split_reshape_test.cpp
@@ -84,6 +123,14 @@ target_compile_definitions(fused_recurrent_gated_delta_rule_test PRIVATE
   TEST_BINARY_DIR="${BINARY_DIR}"
 )
 
+target_compile_definitions(l2norm_test PRIVATE
+  TEST_BINARY_DIR="${BINARY_DIR}"
+)
+
+target_compile_definitions(chunk_gated_delta_rule_test PRIVATE
+  TEST_BINARY_DIR="${BINARY_DIR}"
+)
+
 
 target_compile_definitions(fused_gdn_gating_test PRIVATE
   TEST_BINARY_DIR="${BINARY_DIR}"
@@ -94,6 +141,10 @@ target_compile_definitions(layer_norm_fwd_test PRIVATE
 )
 
 target_compile_definitions(causal_conv1d_update_test PRIVATE
+  TEST_BINARY_DIR="${BINARY_DIR}"
+)
+
+target_compile_definitions(causal_conv1d_update_v2_test PRIVATE
   TEST_BINARY_DIR="${BINARY_DIR}"
 )
 

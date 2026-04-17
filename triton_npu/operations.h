@@ -22,6 +22,11 @@
 
 namespace xllm::kernel::npu {
 
+class L2NormFwdOp final : public OperationBase {
+ public:
+  L2NormFwdOp() : OperationBase("l2norm_fwd_kernel2_loop") {}
+};
+
 class RopeInplaceOp final : public OperationBase {
  public:
   RopeInplaceOp() : OperationBase("rope_inplace_kernel") {}
@@ -43,6 +48,45 @@ class RecurrentGatedDeltaRuleFwdOp final : public OperationBase {
       : OperationBase("fused_recurrent_gated_delta_rule_fwd_kernel") {}
 };
 
+class ChunkGatedDeltaRuleFwdHOp final : public OperationBase {
+ public:
+  ChunkGatedDeltaRuleFwdHOp()
+      : OperationBase("chunk_gated_delta_rule_fwd_kernel_h_blockdim64") {}
+};
+
+class ChunkLocalCumsumScalarOp final : public OperationBase {
+ public:
+  ChunkLocalCumsumScalarOp()
+      : OperationBase("chunk_local_cumsum_scalar_kernel") {}
+};
+
+class ChunkScaledDotKktFwdOp final : public OperationBase {
+ public:
+  ChunkScaledDotKktFwdOp()
+      : OperationBase("chunk_scaled_dot_kkt_fwd_kernel") {}
+};
+
+class SolveTril16x16Op final : public OperationBase {
+ public:
+  SolveTril16x16Op() : OperationBase("solve_tril_16x16_kernel") {}
+};
+
+class Merge16x16To64x64InverseOp final : public OperationBase {
+ public:
+  Merge16x16To64x64InverseOp()
+      : OperationBase("merge_16x16_to_64x64_inverse_kernel") {}
+};
+
+class RecomputeWUForwardOp final : public OperationBase {
+ public:
+  RecomputeWUForwardOp() : OperationBase("recompute_w_u_fwd_kernel") {}
+};
+
+class ChunkForwardOOp final : public OperationBase {
+ public:
+  ChunkForwardOOp() : OperationBase("chunk_fwd_kernel_o") {}
+};
+
 class CausalConv1dUpdateNoCacheNoMtpOp final : public OperationBase {
  public:
   CausalConv1dUpdateNoCacheNoMtpOp()
@@ -53,6 +97,12 @@ class CausalConv1dUpdateQwenDecodeOp final : public OperationBase {
  public:
   CausalConv1dUpdateQwenDecodeOp()
       : OperationBase("_causal_conv1d_update_qwen_decode_kernel") {}
+};
+
+class CausalConv1dUpdateTiledV2Op final : public OperationBase {
+ public:
+  CausalConv1dUpdateTiledV2Op()
+      : OperationBase("_causal_conv1d_update_kernel_npu_tiled_v2") {}
 };
 
 class FusedQkvzbaSplitReshapeOp final : public OperationBase {

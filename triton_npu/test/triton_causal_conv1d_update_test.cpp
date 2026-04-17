@@ -30,7 +30,7 @@
 
 namespace xllm::kernel::npu {
 
-constexpr float kTolerance = 5e-2f;  // bfloat16 tolerance
+constexpr float kTolerance = 5e-2f;
 constexpr int32_t kDeviceId = 0;
 
 #include <torch/torch.h>
@@ -40,7 +40,7 @@ constexpr int32_t kDeviceId = 0;
 
 torch::Tensor causal_conv1d_update_ref(
     const torch::Tensor& x,
-    torch::Tensor& conv_state,  // Modified in-place
+    torch::Tensor& conv_state,
     const torch::Tensor& weight,
     const std::optional<torch::Tensor>& bias = std::nullopt,
     bool activation = true,
@@ -54,7 +54,6 @@ torch::Tensor causal_conv1d_update_ref(
   int64_t width = weight.size(1);
   int64_t state_len = conv_state.size(2);
 
-  // Validate tensor shapes
   TORCH_CHECK(
       conv_state.sizes().vec() == std::vector<int64_t>({batch, dim, state_len}),
       "conv_state shape mismatch. Expected: (",
@@ -75,57 +74,41 @@ torch::Tensor causal_conv1d_update_ref(
 
   torch::Tensor x_new;
   if (!cache_seqlens.has_value()) {
-    // Case 1: Standard state update (non-circular buffer)
     x_new = torch::cat({conv_state, x_}, -1).to(weight.scalar_type());
-    // Update conv_state in-place (last state_len elements)
     conv_state.copy_(x_new.slice(-1, -state_len, x_new.size(-1)));
   } else {
-    // Case 2: Circular buffer update
     auto cache_seqlens_tensor = cache_seqlens.value();
     TORCH_CHECK(
         cache_seqlens_tensor.sizes().vec() == std::vector<int64_t>({batch}),
         "cache_seqlens must be 1D tensor of size (batch,)");
 
-    // Ensure cache_seqlens is on the same device as other tensors
     cache_seqlens_tensor = cache_seqlens_tensor.to(x_.device());
-
-    // Generate width indices: [-(width-1), ..., -1] + cache_seqlens
     auto arange_tensor =
         torch::arange(-(width - 1), 0, torch::kLong).to(x_.device());
     auto width_idx = arange_tensor.unsqueeze(0)
                          .add(cache_seqlens_tensor.unsqueeze(1))
                          .to(torch::kLong);
 
-    // Apply modulo for circular indexing
     width_idx = torch::remainder(width_idx, state_len)
-                    .unsqueeze(1)  // Add dim dimension
+                    .unsqueeze(1)
                     .expand({batch, dim, width - 1});
 
-    // Gather from conv_state using computed indices
     auto state_gathered = conv_state.gather(2, width_idx);
-
-    // Construct new input tensor
     x_new = torch::cat({state_gathered, x_}, -1).to(weight.scalar_type());
 
-    // Compute copy indices for updating conv_state
     auto copy_idx = torch::arange(0, seqlen, torch::kLong)
                         .to(x_.device())
                         .unsqueeze(0)
                         .add(cache_seqlens_tensor.unsqueeze(1));
     copy_idx = torch::remainder(copy_idx, state_len)
-                   .unsqueeze(1)  // Add dim dimension
+                   .unsqueeze(1)
                    .expand({batch, dim, seqlen})
                    .to(torch::kLong);
-
-    // Scatter x into conv_state (in-place update)
     conv_state.scatter_(2, copy_idx, x_);
   }
 
-  // Prepare bias tensor for conv1d
   torch::Tensor bias_tensor = bias.has_value() ? bias.value() : torch::Tensor();
-
-  // Perform depthwise convolution (groups=dim)
-  auto weight_4d = weight.unsqueeze(1);  // (dim, 1, width)
+  auto weight_4d = weight.unsqueeze(1);
   torch::Tensor out = torch::conv1d(x_new,
                                     weight_4d,
                                     bias_tensor,
@@ -133,15 +116,11 @@ torch::Tensor causal_conv1d_update_ref(
                                     /*padding=*/torch::IntArrayRef{0},
                                     /*dilation=*/torch::IntArrayRef{1},
                                     /*groups=*/static_cast<int64_t>(dim));
-
-  // Slice to keep only the last 'seqlen' elements
   out = out.slice(-1, -seqlen, out.size(-1));
 
   if (activation) {
     out = torch::silu(out);
   }
-
-  // Restore original shape and dtype
   if (unsqueeze) {
     out = out.squeeze(-1);
   }
@@ -170,8 +149,6 @@ class TritonCausalConv1dUpdateTest : public ::testing::Test {
     binary_path_ = GetKernelBinaryPath(binary_filename_);
     auto& reg = KernelRegistry::get_instance();
     (void)reg.register_kernel(kernel_name_, binary_path_);
-    // Kernel binary might be missing in some environments; the API call is
-    // still tested.
   }
 
   void TearDown() override {
@@ -205,11 +182,9 @@ TEST_F(TritonCausalConv1dUpdateTest, MultiBatchTest) {
 
   torch::manual_seed(0);
   auto dtype = torch::kBFloat16;
-  float rtol = 1e-2f;
   float atol = 5e-2f;
 
   for (int64_t dim : {2048, 5120}) {
-    // Create input tensors
     auto x = torch::randn({batch, dim, seqlen},
                           torch::TensorOptions().dtype(dtype).device(device));
     auto x_ref = x.clone().cpu();
@@ -229,11 +204,9 @@ TEST_F(TritonCausalConv1dUpdateTest, MultiBatchTest) {
                           torch::TensorOptions().dtype(dtype).device(device));
     }
 
-    // Create conv_state_indices for continuous batching
     auto conv_state_indices = torch::arange(
         batch, torch::TensorOptions().dtype(torch::kInt32).device(device));
 
-    // Run reference implementation on CPU
     auto out_ref = causal_conv1d_update_ref(x_ref,
                                             conv_state_ref,
                                             weight_ref,
@@ -241,7 +214,6 @@ TEST_F(TritonCausalConv1dUpdateTest, MultiBatchTest) {
                                             silu_activation,
                                             std::nullopt);
 
-    // Run NPU kernel
     auto npu_stream = c10_npu::getCurrentNPUStream(kDeviceId);
     auto out =
         npu_causal_conv1d_update(x,
@@ -249,18 +221,16 @@ TEST_F(TritonCausalConv1dUpdateTest, MultiBatchTest) {
                                  weight,
                                  silu_activation,
                                  bias,
-                                 std::nullopt,  // cache_seqlens
+                                 std::nullopt,
                                  conv_state_indices,
-                                 std::nullopt,  // num_accepted_tokens
-                                 std::nullopt,  // query_start_loc
-                                 -1,            // max_query_len
-                                 std::nullopt,  // intermediate_conv_window
-                                 -1,            // pad_slot_id
-                                 false          // validate_data
-        );
+                                 std::nullopt,
+                                 std::nullopt,
+                                 -1,
+                                 std::nullopt,
+                                 -1,
+                                 false);
     aclrtSynchronizeStream(npu_stream.stream());
 
-    // Compare results
     auto out_cpu = out.cpu();
     auto output_diff = (out_ref - out_cpu).abs();
     float max_diff = output_diff.max().item().toFloat();
@@ -268,20 +238,11 @@ TEST_F(TritonCausalConv1dUpdateTest, MultiBatchTest) {
 
     EXPECT_LT(max_diff, dim_atol)
         << "Output mismatch: max diff = " << max_diff
-        << ", tolerance = " << dim_atol << ", dim = " << dim
-        << ", shape: " << out_cpu.sizes() << ", ref range ["
-        << out_ref.min().item().toFloat() << ", "
-        << out_ref.max().item().toFloat() << "]"
-        << ", actual range [" << out_cpu.min().item().toFloat() << ", "
-        << out_cpu.max().item().toFloat() << "]";
+        << ", tolerance = " << dim_atol << ", dim = " << dim;
 
-    // Compare conv_state (it should be updated)
     auto conv_state_cpu = conv_state.cpu();
     auto state_diff = (conv_state_ref - conv_state_cpu).abs();
     float max_state_diff = state_diff.max().item().toFloat();
-
-    // Note: conv_state comparison might have some differences due to numerical
-    // precision We use a more relaxed tolerance for state comparison
     EXPECT_LT(max_state_diff, atol * 2.0f)
         << "Conv state mismatch: max diff = " << max_state_diff
         << ", tolerance = " << (atol * 2.0f) << ", dim = " << dim;
