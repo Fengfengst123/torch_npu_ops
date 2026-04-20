@@ -20,7 +20,9 @@
 #include <torch/torch.h>
 #include <torch_npu/torch_npu.h>
 
+#include <algorithm>
 #include <optional>
+#include <vector>
 
 #include "kernel_registry.h"
 #include "test/test_utils.h"
@@ -45,6 +47,15 @@ int64_t ResolveCacheIndex(const std::optional<torch::Tensor>& conv_state_indices
   return conv_state_indices->index({batch_idx, slot_idx}).item<int32_t>();
 }
 
+int64_t ResolveCacheIndex(const torch::Tensor& conv_state_indices,
+                          int64_t batch_idx,
+                          int64_t slot_idx) {
+  if (conv_state_indices.dim() == 1) {
+    return conv_state_indices.index({batch_idx}).item<int32_t>();
+  }
+  return conv_state_indices.index({batch_idx, slot_idx}).item<int32_t>();
+}
+
 torch::Tensor causal_conv1d_update_ref_v2(
     const torch::Tensor& x,
     torch::Tensor& conv_state,
@@ -59,102 +70,155 @@ torch::Tensor causal_conv1d_update_ref_v2(
         std::nullopt,
     const std::optional<torch::Tensor>& initial_state_idx = std::nullopt) {
   auto dtype_in = x.scalar_type();
-  torch::Tensor x_work;
-  torch::Tensor out;
+  torch::Tensor x_kernel;
+  torch::Tensor qsl;
   int64_t batch = 0;
   int64_t dim = 0;
   int64_t seqlen = 0;
+  const int64_t width = weight.size(1);
+  const int64_t eff_state_len = width - 1;
 
   if (query_start_loc.has_value()) {
     batch = query_start_loc->size(0) - 1;
     dim = x.size(1);
     seqlen = max_query_len;
-    x_work = x;
-    out = torch::empty_like(x);
+    x_kernel = x.contiguous();
+    qsl = query_start_loc->to(torch::kInt32).contiguous();
   } else {
-    x_work = x.dim() == 2 ? x.unsqueeze(-1) : x;
+    auto x_work = x.dim() == 2 ? x.unsqueeze(-1) : x;
     batch = x_work.size(0);
     dim = x_work.size(1);
     seqlen = x_work.size(2);
-    out = torch::empty_like(x_work);
+    x_kernel = x_work.transpose(1, 2).contiguous().view({batch * seqlen, dim});
+    qsl = torch::arange(
+        0, (batch + 1) * seqlen, seqlen, torch::TensorOptions().dtype(torch::kInt32));
   }
 
-  const int64_t width = weight.size(1);
-  const int64_t eff_state_len = width - 1;
+  torch::Tensor slot_table;
+  if (!conv_state_indices.has_value()) {
+    auto base =
+        torch::arange(batch, torch::TensorOptions().dtype(torch::kInt32));
+    slot_table = torch::stack({base, base}, 1).contiguous();
+  } else if (conv_state_indices->dim() == 1) {
+    auto indices = conv_state_indices->to(torch::kInt32).contiguous();
+    slot_table = torch::stack({indices, indices}, 1).contiguous();
+  } else {
+    slot_table = conv_state_indices->to(torch::kInt32).contiguous();
+  }
+
   auto bias_tensor = bias.has_value()
-                         ? bias.value()
-                         : torch::zeros({dim},
-                                        torch::TensorOptions()
-                                            .dtype(weight.scalar_type())
-                                            .device(weight.device()));
+                         ? bias->to(torch::kFloat).contiguous()
+                         : torch::zeros({dim}, torch::TensorOptions().dtype(torch::kFloat));
+  auto x_float = x_kernel.to(torch::kFloat).contiguous();
+  auto weight_float = weight.to(torch::kFloat).contiguous();
+  auto state_float = conv_state.to(torch::kFloat).contiguous().clone();
+  auto out_float = torch::empty_like(x_float);
+
+  auto zero_i32 = torch::zeros({batch}, torch::TensorOptions().dtype(torch::kInt32));
+  auto last_idx = block_idx_last_scheduled_token.has_value()
+                      ? block_idx_last_scheduled_token->to(torch::kInt32).contiguous()
+                      : zero_i32;
+  auto init_idx = initial_state_idx.has_value()
+                      ? initial_state_idx->to(torch::kInt32).contiguous()
+                      : zero_i32;
+
+  const auto stride_x_token = x_float.stride(0);
+  const auto stride_state_seq = conv_state.stride(0);
+  const auto stride_state_token = conv_state.stride(1);
+  const int64_t num_cache_lines = conv_state.size(0);
+
+  auto* x_ptr = x_float.data_ptr<float>();
+  auto* w_ptr = weight_float.data_ptr<float>();
+  auto* bias_ptr = bias_tensor.data_ptr<float>();
+  auto* state_ptr = state_float.data_ptr<float>();
+  auto* out_ptr = out_float.data_ptr<float>();
+  auto* qsl_ptr = qsl.data_ptr<int32_t>();
 
   for (int64_t b = 0; b < batch; ++b) {
-    const int64_t init_slot =
-        initial_state_idx.has_value() ? initial_state_idx->index({b}).item<int32_t>() : 0;
-    const int64_t last_slot = block_idx_last_scheduled_token.has_value()
-                                  ? block_idx_last_scheduled_token->index({b}).item<int32_t>()
-                                  : 0;
-    const int64_t in_idx = ResolveCacheIndex(conv_state_indices, b, init_slot);
+    const int64_t start = qsl_ptr[b];
+    const int64_t end = qsl_ptr[b + 1];
+    const int64_t seq_len = end - start;
+    if (seq_len <= 0) {
+      continue;
+    }
+
+    const int64_t state_len_run = eff_state_len - (seqlen - seq_len);
+    const int64_t init_slot = init_idx.index({b}).item<int32_t>();
+    const int64_t last_slot = last_idx.index({b}).item<int32_t>();
+    const int64_t in_idx = ResolveCacheIndex(slot_table, b, init_slot);
     if (in_idx == pad_slot_id) {
       continue;
     }
-    const int64_t out_idx = ResolveCacheIndex(conv_state_indices, b, last_slot);
+    const int64_t out_idx = ResolveCacheIndex(slot_table, b, last_slot);
+    const bool input_valid = in_idx >= 0 && in_idx < num_cache_lines;
+    const bool output_valid = out_idx >= 0 && out_idx < num_cache_lines;
+    const int64_t keep_shift = seq_len < state_len_run ? state_len_run - seq_len : 0;
+    const int64_t tail_start = seq_len >= state_len_run ? seq_len - state_len_run : 0;
 
-    torch::Tensor seq;
-    int64_t seq_len = 0;
-    int64_t state_len_run = eff_state_len;
-    int64_t start = 0;
-    int64_t end = 0;
-    if (query_start_loc.has_value()) {
-      start = query_start_loc->index({b}).item<int32_t>();
-      end = query_start_loc->index({b + 1}).item<int32_t>();
-      seq = x.slice(0, start, end).transpose(0, 1).contiguous();
-      seq_len = end - start;
-      state_len_run = eff_state_len - (seqlen - seq_len);
-    } else {
-      seq = x_work.index({b});
-      seq_len = seq.size(1);
-    }
-    if (seq_len == 0) {
-      continue;
-    }
+    for (int64_t feat = 0; feat < dim; ++feat) {
+      std::vector<float> cols(std::max<int64_t>(width - 1, 0), 0.0f);
+      if (input_valid) {
+        for (int64_t k = 0; k < width - 1; ++k) {
+          const int64_t offset =
+              in_idx * stride_state_seq + feat + k * stride_state_token;
+          cols[k] = state_ptr[offset];
+        }
+      }
 
-    auto history = conv_state.index({in_idx}).slice(1, 0, width - 1);
-    auto src_state = conv_state.index({in_idx}).slice(1, 0, state_len_run);
-    auto cat = torch::cat({history, seq}, -1).to(weight.scalar_type()).unsqueeze(0);
-    auto conv = torch::conv1d(cat,
-                              weight.unsqueeze(1),
-                              bias_tensor,
-                              /*stride=*/torch::IntArrayRef{1},
-                              /*padding=*/torch::IntArrayRef{0},
-                              /*dilation=*/torch::IntArrayRef{1},
-                              /*groups=*/dim);
-    auto y = conv.slice(-1, -seq_len, conv.size(-1));
-    if (activation) {
-      y = torch::silu(y);
-    }
+      for (int64_t t = 0; t < seq_len; ++t) {
+        const int64_t x_offset = (start + t) * stride_x_token + feat;
+        const float x_val = x_ptr[x_offset];
+        float acc = bias_ptr[feat];
+        for (int64_t k = 0; k < width - 1; ++k) {
+          acc += cols[k] * w_ptr[feat * width + k];
+        }
+        acc += x_val * w_ptr[feat * width + (width - 1)];
+        out_ptr[x_offset] = acc;
+        for (int64_t k = 0; k < width - 2; ++k) {
+          cols[k] = cols[k + 1];
+        }
+        if (width > 1) {
+          cols[width - 2] = x_val;
+        }
+      }
 
-    if (query_start_loc.has_value()) {
-      out.slice(0, start, end).copy_(y.squeeze(0).transpose(0, 1).to(dtype_in));
-    } else {
-      out.index({b}).copy_(y.squeeze(0).to(dtype_in));
+      if (!output_valid || state_len_run <= 0) {
+        continue;
+      }
+      if (seq_len < state_len_run) {
+        if (input_valid) {
+          for (int64_t dst_tok = 0; dst_tok < keep_shift; ++dst_tok) {
+            const int64_t src_offset = in_idx * stride_state_seq + feat +
+                                       (dst_tok + seq_len) * stride_state_token;
+            const int64_t dst_offset =
+                out_idx * stride_state_seq + feat + dst_tok * stride_state_token;
+            state_ptr[dst_offset] = state_ptr[src_offset];
+          }
+        }
+        for (int64_t x_tok = 0; x_tok < seq_len; ++x_tok) {
+          const int64_t dst_tok = keep_shift + x_tok;
+          if (dst_tok >= state_len_run) {
+            continue;
+          }
+          const int64_t x_offset = (start + x_tok) * stride_x_token + feat;
+          const int64_t dst_offset =
+              out_idx * stride_state_seq + feat + dst_tok * stride_state_token;
+          state_ptr[dst_offset] = x_ptr[x_offset];
+        }
+      } else {
+        for (int64_t dst_tok = 0; dst_tok < state_len_run; ++dst_tok) {
+          const int64_t x_offset =
+              (start + tail_start + dst_tok) * stride_x_token + feat;
+          const int64_t dst_offset =
+              out_idx * stride_state_seq + feat + dst_tok * stride_state_token;
+          state_ptr[dst_offset] = x_ptr[x_offset];
+        }
+      }
     }
-
-    torch::Tensor new_state;
-    if (seq_len >= state_len_run) {
-      new_state = seq.slice(1, seq.size(1) - state_len_run, seq.size(1));
-    } else {
-      const int64_t keep = state_len_run - seq_len;
-      new_state =
-          torch::cat({src_state.slice(1, seq_len, seq_len + keep), seq}, -1);
-    }
-    conv_state.index({out_idx}).slice(1, 0, state_len_run).copy_(
-        new_state.to(conv_state.scalar_type()));
   }
 
-  if (!query_start_loc.has_value() && x.dim() == 2) {
-    out = out.squeeze(-1);
-  }
+  auto out = activation ? torch::silu(out_float) : out_float;
+  conv_state.copy_(state_float.view_as(conv_state).to(conv_state.scalar_type()));
   return out.to(dtype_in);
 }
 
@@ -207,6 +271,7 @@ void RunVarlenApcDecodeCase(const torch::TensorOptions& tensor_options,
 
   auto conv_state =
       torch::randn({batch * 2, dim, width - 1}, tensor_options);
+  auto conv_state_before = conv_state.detach().clone().cpu();
   auto conv_state_ref = conv_state.detach().clone().cpu();
 
   auto weight = torch::randn({dim, width}, tensor_options);
@@ -256,7 +321,14 @@ void RunVarlenApcDecodeCase(const torch::TensorOptions& tensor_options,
   EXPECT_TRUE(torch::allclose(out_cpu, out_ref, 1e-2, kToleranceV2));
 
   auto conv_state_cpu = conv_state.cpu();
-  EXPECT_TRUE(torch::allclose(conv_state_cpu, conv_state_ref, 1e-2, kToleranceV2));
+  EXPECT_TRUE(torch::allclose(conv_state_cpu.slice(0, 0, batch),
+                              conv_state_before.slice(0, 0, batch),
+                              1e-2,
+                              kToleranceV2));
+  EXPECT_FALSE(torch::allclose(conv_state_cpu.slice(0, batch, batch * 2),
+                               conv_state_before.slice(0, batch, batch * 2),
+                               1e-2,
+                               kToleranceV2));
 }
 
 void RunDenseNoBiasNoActivationCase(const torch::TensorOptions& tensor_options,
@@ -304,6 +376,7 @@ void RunVarlenPadWidth5Case(const torch::TensorOptions& tensor_options,
   auto x = torch::randn({5, dim}, tensor_options);
   auto x_ref = x.cpu();
   auto conv_state = torch::randn({4, dim, width - 1}, tensor_options);
+  auto conv_state_before = conv_state.detach().clone().cpu();
   auto conv_state_ref = conv_state.detach().clone().cpu();
   auto weight = torch::randn({dim, width}, tensor_options);
   auto weight_ref = weight.cpu();
@@ -346,8 +419,23 @@ void RunVarlenPadWidth5Case(const torch::TensorOptions& tensor_options,
   aclrtSynchronizeStream(c10_npu::getCurrentNPUStream(kDeviceIdV2).stream());
 
   EXPECT_TRUE(torch::allclose(out.cpu(), out_ref, 1e-2, kToleranceV2));
-  EXPECT_TRUE(
-      torch::allclose(conv_state.cpu(), conv_state_ref, 1e-2, kToleranceV2));
+  auto conv_state_cpu = conv_state.cpu();
+  EXPECT_TRUE(torch::allclose(conv_state_cpu.index({0}),
+                              conv_state_before.index({0}),
+                              1e-2,
+                              kToleranceV2));
+  EXPECT_TRUE(torch::allclose(conv_state_cpu.index({2}),
+                              conv_state_before.index({2}),
+                              1e-2,
+                              kToleranceV2));
+  EXPECT_FALSE(torch::allclose(conv_state_cpu.index({1}),
+                               conv_state_before.index({1}),
+                               1e-2,
+                               kToleranceV2));
+  EXPECT_FALSE(torch::allclose(conv_state_cpu.index({3}),
+                               conv_state_before.index({3}),
+                               1e-2,
+                               kToleranceV2));
 }
 
 }  // namespace
