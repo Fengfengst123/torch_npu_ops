@@ -34,6 +34,7 @@ int64_t cdiv(int64_t a, int64_t b) {
   return (a + b - 1) / b;
 }
 
+
 std::optional<torch::Tensor> prepare_chunk_indices_like_python(
     const std::optional<torch::Tensor>& cu_seqlens,
     int64_t chunk_size) {
@@ -167,9 +168,9 @@ torch::Tensor npu_chunk_local_cumsum(
   //               "chunk_local_cumsum only supports B=1 when cu_seqlens is "
   //               "provided.");
   // }
-  TORCH_CHECK(H <= 16,
+  TORCH_CHECK(H <= 32,
               "chunk_local_cumsum runtime-variable adapter currently supports "
-              "H <= 16, got ",
+              "H <= 32, got ",
               H);
 
   const int64_t block_t = 512;
@@ -189,7 +190,7 @@ torch::Tensor npu_chunk_local_cumsum(
       g_contig.sizes(),
       torch::TensorOptions().dtype(torch::kFloat32).device(g.device()));
 
-  auto npu_stream = c10_npu::getCurrentNPUStream();
+  auto npu_stream = c10_npu::getCurrentNPUStream(g_contig.device().index());
   rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
   void* cu_ptr = cu_prepared.has_value() ? cu_prepared.value().data_ptr() : nullptr;
   void* block_indices_ptr =
@@ -252,7 +253,7 @@ torch::Tensor npu_chunk_scaled_dot_kkt_fwd(
   auto A = torch::empty({B, T, H, chunk_size},
                         torch::TensorOptions().dtype(torch::kFloat32).device(k.device()));
 
-  auto npu_stream = c10_npu::getCurrentNPUStream();
+  auto npu_stream = c10_npu::getCurrentNPUStream(k_contig.device().index());
   rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
   void* cu_ptr = cu_prepared.has_value() ? cu_prepared.value().data_ptr() : nullptr;
   void* chunk_indices_ptr =
@@ -323,7 +324,7 @@ torch::Tensor npu_solve_tril(
   auto Ad = torch::empty({B, T, H, 16},
                          torch::TensorOptions().dtype(torch::kFloat32).device(A.device()));
 
-  auto npu_stream = c10_npu::getCurrentNPUStream();
+  auto npu_stream = c10_npu::getCurrentNPUStream(A_contig.device().index());
   rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
   void* cu_ptr = cu_prepared.has_value() ? cu_prepared.value().data_ptr() : nullptr;
   void* large_indices_ptr = large_block_indices.has_value()
@@ -426,7 +427,7 @@ std::pair<torch::Tensor, torch::Tensor> npu_recompute_w_u_fwd(
                         torch::TensorOptions().dtype(k.dtype()).device(k.device()));
   auto u = torch::empty_like(v_contig);
 
-  auto npu_stream = c10_npu::getCurrentNPUStream();
+  auto npu_stream = c10_npu::getCurrentNPUStream(k_contig.device().index());
   rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
   void* cu_ptr = cu_prepared.has_value() ? cu_prepared.value().data_ptr() : nullptr;
   void* chunk_indices_ptr =
@@ -505,7 +506,7 @@ torch::Tensor npu_chunk_fwd_o(
   const int64_t N = cu_prepared.has_value() ? cu_prepared.value().numel() - 1 : B;
   auto out = torch::empty_like(v_contig);
 
-  auto npu_stream = c10_npu::getCurrentNPUStream();
+  auto npu_stream = c10_npu::getCurrentNPUStream(q_contig.device().index());
   rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
   void* cu_ptr = cu_prepared.has_value() ? cu_prepared.value().data_ptr() : nullptr;
   void* chunk_offsets_ptr =
@@ -604,12 +605,8 @@ std::pair<torch::Tensor, torch::Tensor> npu_chunk_gated_delta_rule(
   //               B);
   // }
 
-  auto q_prepared = use_qk_l2norm_in_kernel
-                        ? npu_l2norm_last_dim(q, 1e-6)
-                        : q;
-  auto k_prepared = use_qk_l2norm_in_kernel
-                        ? npu_l2norm_last_dim(k, 1e-6)
-                        : k;
+  auto q_prepared = use_qk_l2norm_in_kernel ? npu_l2norm_last_dim(q) : q;
+  auto k_prepared = use_qk_l2norm_in_kernel ? npu_l2norm_last_dim(k) : k;
   auto cu_prepared = cu_seqlens.has_value()
                          ? std::optional<torch::Tensor>(
                                cu_seqlens.value().to(torch::kInt32).contiguous())
@@ -617,11 +614,11 @@ std::pair<torch::Tensor, torch::Tensor> npu_chunk_gated_delta_rule(
   auto g_cumsum = npu_chunk_local_cumsum(g, chunk_size, cu_prepared);
   const float scale_value =
       scale.has_value() ? scale.value() : std::pow(static_cast<float>(K), -0.5f);
-  auto A =
-      npu_chunk_scaled_dot_kkt_fwd(k_prepared, beta, g_cumsum, chunk_size, cu_prepared);
+  auto A = npu_chunk_scaled_dot_kkt_fwd(
+      k_prepared, beta, g_cumsum, chunk_size, cu_prepared);
   auto A_inv = npu_solve_tril(A, chunk_size, cu_prepared, k.scalar_type());
-  auto [w, u] = npu_recompute_w_u_fwd(
-      k_prepared, v, beta, g_cumsum, A_inv, cu_prepared);
+  auto [w, u] =
+      npu_recompute_w_u_fwd(k_prepared, v, beta, g_cumsum, A_inv, cu_prepared);
   auto init_state_prepared =
       initial_state.has_value()
           ? std::optional<torch::Tensor>(
@@ -639,16 +636,9 @@ std::pair<torch::Tensor, torch::Tensor> npu_chunk_gated_delta_rule(
       cu_prepared,
       std::nullopt);
   auto out = npu_chunk_fwd_o(
-      q_prepared,
-      k_prepared,
-      v_new,
-      h,
-      g_cumsum,
-      scale_value,
-      chunk_size,
-      cu_prepared);
-  auto out_cast = out.to(input_dtype);
-  return {out_cast, output_final_state ? final_state : torch::Tensor()};
+      q_prepared, k_prepared, v_new, h, g_cumsum, scale_value, chunk_size, cu_prepared);
+
+  return {out.to(input_dtype), output_final_state ? final_state : torch::Tensor()};
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> npu_chunk_gated_delta_rule_fwd_h(
@@ -740,7 +730,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> npu_chunk_gated_delta_ru
     v_new = torch::empty_like(u);
   }
 
-  auto npu_stream = c10_npu::getCurrentNPUStream();
+  auto npu_stream = c10_npu::getCurrentNPUStream(k_contig.device().index());
   rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
 
   int32_t gridX = 1;
@@ -766,28 +756,24 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> npu_chunk_gated_delta_ru
   void* h_update_ptr = h_update.data_ptr();
 
   auto& op = OperationFactory::instance().chunk_gated_delta_rule_fwd_h();
-  auto ret = op.execute(stream,
-                        gridX,
-                        gridY,
-                        gridZ,
-                        [&](ArgsBuilder& ab) {
-                          ab.constructArgs(k_ptr,
-                                           u_ptr,
-                                           w_ptr,
-                                           v_new_ptr,
-                                           g_ptr,
-                                           h_ptr,
-                                           h0_ptr,
-                                           ht_ptr,
-                                           cu_seqlens_ptr,
-                                           chunk_offsets_ptr,
-                                           h_update_ptr,
-                                           static_cast<int32_t>(T),
-                                           static_cast<int32_t>(H),
-                                           static_cast<int32_t>(Hg),
-                                           static_cast<int32_t>(K),
-                                           static_cast<int32_t>(V));
-                        });
+  auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+    ab.constructArgs(k_ptr,
+                     u_ptr,
+                     w_ptr,
+                     v_new_ptr,
+                     g_ptr,
+                     h_ptr,
+                     h0_ptr,
+                     ht_ptr,
+                     cu_seqlens_ptr,
+                     chunk_offsets_ptr,
+                     h_update_ptr,
+                     static_cast<int32_t>(T),
+                     static_cast<int32_t>(H),
+                     static_cast<int32_t>(Hg),
+                     static_cast<int32_t>(K),
+                     static_cast<int32_t>(V));
+  });
 
   if (ret != RT_ERROR_NONE) {
     LOG(ERROR) << "rtKernelLaunch failed for "

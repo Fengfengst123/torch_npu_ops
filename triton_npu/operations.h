@@ -105,10 +105,28 @@ class CausalConv1dUpdateTiledV2Op final : public OperationBase {
       : OperationBase("_causal_conv1d_update_kernel_npu_tiled_v2") {}
 };
 
-class FusedQkvzbaSplitReshapeOp final : public OperationBase {
+class FusedQkvzbaSplitReshapeGqaR1Op final : public OperationBase {
  public:
-  FusedQkvzbaSplitReshapeOp()
-      : OperationBase("fused_qkvzba_split_reshape_cat_kernel") {}
+  FusedQkvzbaSplitReshapeGqaR1Op()
+      : OperationBase("fused_qkvzba_split_reshape_cat_gqa_r1_kernel") {}
+};
+
+class FusedQkvzbaSplitReshapeGqaR2Op final : public OperationBase {
+ public:
+  FusedQkvzbaSplitReshapeGqaR2Op()
+      : OperationBase("fused_qkvzba_split_reshape_cat_gqa_r2_kernel") {}
+};
+
+class FusedQkvzbaSplitReshapeGqaR3Op final : public OperationBase {
+ public:
+  FusedQkvzbaSplitReshapeGqaR3Op()
+      : OperationBase("fused_qkvzba_split_reshape_cat_gqa_r3_kernel") {}
+};
+
+class FusedQkvzbaSplitReshapeGqaR4Op final : public OperationBase {
+ public:
+  FusedQkvzbaSplitReshapeGqaR4Op()
+      : OperationBase("fused_qkvzba_split_reshape_cat_gqa_r4_kernel") {}
 };
 
 }  // namespace xllm::kernel::npu

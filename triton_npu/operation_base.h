@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -35,7 +36,22 @@ class OperationBase {
       : kernel_name_(std::move(kernel_name)),
         npubin_path_(std::move(npubin_path)) {}
 
-  virtual ~OperationBase() = default;
+  virtual ~OperationBase() {
+    std::lock_guard<std::mutex> guard(pending_mu_);
+    for (auto& pending : pending_releases_) {
+      if (pending.event != nullptr) {
+        aclrtSynchronizeEvent(pending.event);
+        aclrtDestroyEvent(pending.event);
+      }
+      if (pending.workspace) {
+        aclrtFree(pending.workspace);
+      }
+      if (pending.lock) {
+        aclrtFree(pending.lock);
+      }
+    }
+    pending_releases_.clear();
+  }
 
   template <class BuildArgsFn>
   rtError_t execute(rtStream_t stream,
@@ -90,7 +106,41 @@ class OperationBase {
                             static_cast<uint32_t>(ab.size()),
                             nullptr,
                             stream);
-    cleanup_workspace(workspace, lock);
+
+    // In graph capture mode, aclrtRecordEvent is not supported (207000).
+    // We skip async release and free workspace immediately, because graph
+    // capture only records operations; the actual execution happens later
+    // when the graph is replayed, and the graph mempool manages temporary
+    // allocations independently.
+    // In eager mode, we use an event to release workspace asynchronously
+    // without blocking the host.
+    aclrtEvent event = nullptr;
+    auto event_ret = aclrtCreateEvent(&event);
+    if (event_ret == ACL_ERROR_NONE) {
+      event_ret = aclrtRecordEvent(event, stream);
+      if (event_ret == ACL_ERROR_NONE) {
+        std::lock_guard<std::mutex> guard(pending_mu_);
+        pending_releases_.push_back({workspace, lock, event});
+      } else if (event_ret == ACL_ERROR_RT_FEATURE_NOT_SUPPORT) {
+        // Graph capture mode: event recording is unsupported.
+        // Destroy the created event and free workspace synchronously.
+        aclrtDestroyEvent(event);
+        cleanup_workspace(workspace, lock);
+      } else {
+        LOG(WARNING) << "aclrtRecordEvent failed for '" << kernel_name_
+                     << "': " << event_ret;
+        aclrtDestroyEvent(event);
+        cleanup_workspace(workspace, lock);
+      }
+    } else {
+      LOG(WARNING) << "aclrtCreateEvent failed for '" << kernel_name_
+                   << "': " << event_ret;
+      cleanup_workspace(workspace, lock);
+    }
+
+    // Opportunistically clean up completed releases from previous calls.
+    cleanup_completed_releases();
+
     return rt_ret;
   }
 
@@ -195,9 +245,51 @@ class OperationBase {
     }
   }
 
+  struct PendingRelease {
+    void* workspace = nullptr;
+    void* lock = nullptr;
+    aclrtEvent event = nullptr;
+  };
+
+  void cleanup_completed_releases() {
+    std::lock_guard<std::mutex> guard(pending_mu_);
+    auto it = pending_releases_.begin();
+    while (it != pending_releases_.end()) {
+      if (it->event == nullptr) {
+        // Already freed or fallback path
+        it = pending_releases_.erase(it);
+        continue;
+      }
+
+      aclrtEventStatus status = ACL_EVENT_STATUS_NOT_READY;
+      auto ret = aclrtQueryEvent(it->event, &status);
+      if (ret != ACL_ERROR_NONE) {
+        LOG(WARNING) << "aclrtQueryEvent failed for '" << kernel_name_
+                     << "': " << ret;
+        ++it;
+        continue;
+      }
+
+      if (status == ACL_EVENT_STATUS_COMPLETE) {
+        if (it->workspace) {
+          aclrtFree(it->workspace);
+        }
+        if (it->lock) {
+          aclrtFree(it->lock);
+        }
+        aclrtDestroyEvent(it->event);
+        it = pending_releases_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
  private:
   std::string kernel_name_;
   std::string npubin_path_;
+  std::mutex pending_mu_;
+  std::vector<PendingRelease> pending_releases_;
 };
 
 }  // namespace xllm::kernel::npu

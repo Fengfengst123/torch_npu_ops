@@ -19,6 +19,41 @@
 
 namespace xllm::kernel::npu {
 
+namespace {
+
+OperationBase* select_fused_qkvzba_split_reshape_op(int32_t v_heads_per_qk) {
+  auto& factory = OperationFactory::instance();
+  switch (v_heads_per_qk) {
+    case 1:
+      return &factory.fused_qkvzba_split_reshape_gqa_r1();
+    case 2:
+      return &factory.fused_qkvzba_split_reshape_gqa_r2();
+    case 3:
+      return &factory.fused_qkvzba_split_reshape_gqa_r3();
+    case 4:
+      return &factory.fused_qkvzba_split_reshape_gqa_r4();
+    default:
+      return nullptr;
+  }
+}
+
+const char* fused_qkvzba_split_reshape_kernel_name(int32_t v_heads_per_qk) {
+  switch (v_heads_per_qk) {
+    case 1:
+      return "fused_qkvzba_split_reshape_cat_gqa_r1_kernel";
+    case 2:
+      return "fused_qkvzba_split_reshape_cat_gqa_r2_kernel";
+    case 3:
+      return "fused_qkvzba_split_reshape_cat_gqa_r3_kernel";
+    case 4:
+      return "fused_qkvzba_split_reshape_cat_gqa_r4_kernel";
+    default:
+      return "fused_qkvzba_split_reshape_cat_gqa_unknown_kernel";
+  }
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Helper: ceil integer division
 // ---------------------------------------------------------------------------
@@ -92,6 +127,14 @@ npu_fused_qkvzba_split_reshape_cat(
   const int32_t total_rows = batch;  // seq_len = 1 for decode
 
   const int32_t v_heads_per_qk = num_heads_v / num_heads_qk;
+  TORCH_CHECK(v_heads_per_qk >= 1 && v_heads_per_qk <= 4,
+              "npu_fused_qkvzba_split_reshape_cat only supports "
+              "v_heads_per_qk in [1, 4], but got ",
+              v_heads_per_qk,
+              " for num_heads_qk=",
+              num_heads_qk,
+              " num_heads_v=",
+              num_heads_v);
   const int32_t v_dim_per_qk = v_heads_per_qk * head_v;
   const int32_t qkvz_dim_t = head_qk * 2 + v_dim_per_qk * 2;
   const int32_t ba_dim_t = v_heads_per_qk * 2;
@@ -143,8 +186,13 @@ npu_fused_qkvzba_split_reshape_cat(
   auto npuStream = c10_npu::getCurrentNPUStream();
   rtStream_t stream = static_cast<rtStream_t>(npuStream.stream());
 
-  auto& op = OperationFactory::instance().fused_qkvzba_split_reshape();
-  auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+  auto* op = select_fused_qkvzba_split_reshape_op(v_heads_per_qk);
+  TORCH_CHECK(op != nullptr,
+              "failed to select fused_qkvzba_split_reshape op for "
+              "v_heads_per_qk=",
+              v_heads_per_qk);
+
+  auto ret = op->execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
     // Kernel signature (after moving tl.constexpr to the end):
     //   output ptrs:  mixed_qkv, z, b, a
     //   input ptrs:   mixed_qkvz, mixed_ba
@@ -173,7 +221,9 @@ npu_fused_qkvzba_split_reshape_cat(
 
   if (ret != RT_ERROR_NONE) {
     LOG(ERROR) << "rtKernelLaunch failed for "
-                  "'fused_qkvzba_split_reshape_cat_kernel': "
+                  "'"
+               << fused_qkvzba_split_reshape_kernel_name(v_heads_per_qk)
+               << "': "
                << ret;
   }
 

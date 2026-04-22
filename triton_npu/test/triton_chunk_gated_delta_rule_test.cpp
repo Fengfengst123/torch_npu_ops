@@ -96,6 +96,33 @@ ChunkTestParam MakeRealShapeCase(std::string name,
                               initial_state_dtype);
 }
 
+ChunkTestParam MakeLongRealShapeCase(std::string name,
+                                     bool create_inputs_on_cpu,
+                                     torch::ScalarType initial_state_dtype =
+                                         torch::kBFloat16) {
+  return MakePythonVarlenCase(std::move(name),
+                              {1, 10240, 16, 128},
+                              {1, 10240, 16, 128},
+                              {1, 16, 128, 128},
+                              {0, 10240},
+                              create_inputs_on_cpu,
+                              initial_state_dtype);
+}
+
+ChunkTestParam MakeRequested4096GroupedHeadsCase(
+    std::string name,
+    int64_t num_heads_qk,
+    int64_t num_heads_v,
+    bool create_inputs_on_cpu,
+    torch::ScalarType initial_state_dtype = torch::kBFloat16) {
+  return MakePythonVarlenCase(std::move(name),
+                              {1, 4096, num_heads_qk, 128},
+                              {1, 4096, num_heads_v, 128},
+                              {1, num_heads_v, 128, 128},
+                              {0, 4096},
+                              create_inputs_on_cpu,
+                              initial_state_dtype);
+}
 
 struct ChunkRefResult {
   torch::Tensor out;
@@ -484,6 +511,38 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(
         MakeRealShapeCase("RealShapeDeviceInput", false),
         MakeRealShapeCase("RealShapeCpuInput", true),
+        MakeRequested4096GroupedHeadsCase("Requested4096H8To16DeviceInput",
+                                          8,
+                                          16,
+                                          false),
+        MakeRequested4096GroupedHeadsCase("Requested4096H8To16CpuInput",
+                                          8,
+                                          16,
+                                          true),
+        MakeRequested4096GroupedHeadsCase("Requested4096H8To16DeviceInputFp32State",
+                                          8,
+                                          16,
+                                          false,
+                                          torch::kFloat32),
+        MakeRequested4096GroupedHeadsCase("Requested4096H16To32DeviceInput",
+                                          16,
+                                          32,
+                                          false),
+        MakeRequested4096GroupedHeadsCase("Requested4096H16To32DeviceInputFp32State",
+                                          16,
+                                          32,
+                                          false,
+                                          torch::kFloat32),
+        MakeRequested4096GroupedHeadsCase("Requested4096H4To8DeviceInput",
+                                          4,
+                                          8,
+                                          false),
+        MakeRequested4096GroupedHeadsCase("Requested4096H4To8DeviceInputFp32State",
+                                          4,
+                                          8,
+                                          false,
+                                          torch::kFloat32),
+        MakeLongRealShapeCase("LongRealShapeDeviceInput", false),
         MakeRealShapeCase(
             "RealShapeDeviceInputFloatInitialState",
             false,

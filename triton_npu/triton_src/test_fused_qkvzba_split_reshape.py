@@ -3,6 +3,8 @@ import triton
 import triton.language as tl
 import pytest
 
+SUPPORTED_V_HEADS_PER_QK = (1, 2, 3, 4)
+
 
 def get_vectorcore_num() -> int:
     """Return the number of vector cores available on the current NPU device.
@@ -21,15 +23,17 @@ def get_vectorcore_num() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Triton kernel (migrated from vllm-ascend PR #6740)
-# Uses do_not_specialize for total_rows / rows_per_vec so that a single
-# binary can serve any batch size > 65535.
+# Triton kernels (migrated from vllm-ascend PR #6740)
+# `v_heads_per_qk` affects the compile-time tile sizes used by tl.arange, so we
+# keep one AOT kernel per supported ratio. Other launch parameters still use
+# do_not_specialize so each ratio-specific binary can serve many runtime shapes.
+# ---------------------------------------------------------------------------
 @triton.jit(do_not_specialize=["total_rows", "rows_per_vec",
                                 "num_heads_qk", "num_heads_v",
                                 "qkvz_row_stride", "ba_row_stride",
                                 "qkv_row_stride", "z_row_stride",
                                 "ba_out_row_stride"])
-def fused_qkvzba_split_reshape_cat_kernel(
+def fused_qkvzba_split_reshape_cat_gqa_r1_kernel(
     mixed_qkv,
     z,
     b,
@@ -46,14 +50,8 @@ def fused_qkvzba_split_reshape_cat_kernel(
     qkv_row_stride,
     z_row_stride,
     ba_out_row_stride,
-    # tl.constexpr parameters (must be at the end)
-    HEAD_QK: tl.constexpr,          # architectural constant, safe to fold
-    HEAD_V: tl.constexpr,           # architectural constant, safe to fold
-    # Pre-computed from num_heads_* in wrapper; kept constexpr for tl.arange
-    V_HEADS_PER_QK: tl.constexpr,   # = num_heads_v // num_heads_qk
-    V_DIM_PER_QK: tl.constexpr,     # = V_HEADS_PER_QK * HEAD_V
-    QKVZ_DIM_T: tl.constexpr,       # = HEAD_QK * 2 + V_DIM_PER_QK * 2
-    BA_DIM_T: tl.constexpr,         # = V_HEADS_PER_QK * 2
+    HEAD_QK: tl.constexpr,
+    HEAD_V: tl.constexpr,
     ROWS_PER_ITER: tl.constexpr,
 ):
     vec_id = tl.program_id(0)
@@ -73,7 +71,7 @@ def fused_qkvzba_split_reshape_cat_kernel(
 
         # tl.range (runtime loop) because num_heads_qk is do_not_specialize
         for head_id in tl.range(num_heads_qk):
-            src_head_offset = head_id * QKVZ_DIM_T
+            src_head_offset = head_id * (HEAD_QK * 2 + HEAD_V * 2)
 
             # Q
             q_range = tl.arange(0, HEAD_QK)
@@ -90,33 +88,282 @@ def fused_qkvzba_split_reshape_cat_kernel(
             tl.store(mixed_qkv + k_dst, k_data, mask=row_mask[:, None])
 
             # V
-            v_range = tl.arange(0, V_DIM_PER_QK)
+            v_range = tl.arange(0, HEAD_V)
             v_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + v_range[None, :]
-            v_dst = row_indices[:, None] * qkv_row_stride + num_heads_qk * HEAD_QK * 2 + head_id * V_DIM_PER_QK + v_range[None, :]
+            v_dst = row_indices[:, None] * qkv_row_stride + num_heads_qk * HEAD_QK * 2 + head_id * HEAD_V + v_range[None, :]
             v_data = tl.load(mixed_qkvz + v_src, mask=row_mask[:, None])
             tl.store(mixed_qkv + v_dst, v_data, mask=row_mask[:, None])
 
             # Z
-            z_range = tl.arange(0, V_DIM_PER_QK)
-            z_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + V_DIM_PER_QK + z_range[None, :]
-            z_dst = row_indices[:, None] * z_row_stride + head_id * V_DIM_PER_QK + z_range[None, :]
+            z_range = tl.arange(0, HEAD_V)
+            z_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + HEAD_V + z_range[None, :]
+            z_dst = row_indices[:, None] * z_row_stride + head_id * HEAD_V + z_range[None, :]
             z_data = tl.load(mixed_qkvz + z_src, mask=row_mask[:, None])
             tl.store(z + z_dst, z_data, mask=row_mask[:, None])
 
             # B and A (scalar per v-head, stored interleaved in mixed_ba)
-            ba_head_offset = head_id * BA_DIM_T
-            b_range = tl.arange(0, V_HEADS_PER_QK)
+            ba_head_offset = head_id * 2
+            b_range = tl.arange(0, 1)
             b_src = row_indices[:, None] * ba_row_stride + ba_head_offset + b_range[None, :]
-            b_dst = row_indices[:, None] * ba_out_row_stride + head_id * V_HEADS_PER_QK + b_range[None, :]
+            b_dst = row_indices[:, None] * ba_out_row_stride + head_id + b_range[None, :]
             b_data = tl.load(mixed_ba + b_src, mask=row_mask[:, None])
             tl.store(b + b_dst, b_data, mask=row_mask[:, None])
 
             # A
-            a_src = row_indices[:, None] * ba_row_stride + ba_head_offset + V_HEADS_PER_QK + b_range[None, :]
+            a_src = row_indices[:, None] * ba_row_stride + ba_head_offset + 1 + b_range[None, :]
             a_data = tl.load(mixed_ba + a_src, mask=row_mask[:, None])
             tl.store(a + b_dst, a_data, mask=row_mask[:, None])
 
         row_offset += ROWS_PER_ITER
+
+
+@triton.jit(do_not_specialize=["total_rows", "rows_per_vec",
+                                "num_heads_qk", "num_heads_v",
+                                "qkvz_row_stride", "ba_row_stride",
+                                "qkv_row_stride", "z_row_stride",
+                                "ba_out_row_stride"])
+def fused_qkvzba_split_reshape_cat_gqa_r2_kernel(
+    mixed_qkv,
+    z,
+    b,
+    a,
+    mixed_qkvz,
+    mixed_ba,
+    num_heads_qk,
+    num_heads_v,
+    total_rows,
+    rows_per_vec,
+    qkvz_row_stride,
+    ba_row_stride,
+    qkv_row_stride,
+    z_row_stride,
+    ba_out_row_stride,
+    HEAD_QK: tl.constexpr,
+    HEAD_V: tl.constexpr,
+    ROWS_PER_ITER: tl.constexpr,
+):
+    vec_id = tl.program_id(0)
+
+    row_start = vec_id * rows_per_vec
+    row_end = tl.minimum(row_start + rows_per_vec, total_rows)
+
+    row_offset = row_start
+    iter_count = (row_end - row_start + ROWS_PER_ITER - 1) // ROWS_PER_ITER
+
+    for _ in tl.range(iter_count):
+        row_indices = tl.arange(0, ROWS_PER_ITER) + row_offset
+        row_mask = row_indices < row_end
+
+        for head_id in tl.range(num_heads_qk):
+            src_head_offset = head_id * (HEAD_QK * 2 + HEAD_V * 4)
+
+            q_range = tl.arange(0, HEAD_QK)
+            q_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + q_range[None, :]
+            q_dst = row_indices[:, None] * qkv_row_stride + head_id * HEAD_QK + q_range[None, :]
+            q_data = tl.load(mixed_qkvz + q_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + q_dst, q_data, mask=row_mask[:, None])
+
+            k_range = tl.arange(0, HEAD_QK)
+            k_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK + k_range[None, :]
+            k_dst = row_indices[:, None] * qkv_row_stride + num_heads_qk * HEAD_QK + head_id * HEAD_QK + k_range[None, :]
+            k_data = tl.load(mixed_qkvz + k_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + k_dst, k_data, mask=row_mask[:, None])
+
+            v_range = tl.arange(0, HEAD_V * 2)
+            v_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + v_range[None, :]
+            v_dst = row_indices[:, None] * qkv_row_stride + num_heads_qk * HEAD_QK * 2 + head_id * (HEAD_V * 2) + v_range[None, :]
+            v_data = tl.load(mixed_qkvz + v_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + v_dst, v_data, mask=row_mask[:, None])
+
+            z_range = tl.arange(0, HEAD_V * 2)
+            z_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + HEAD_V * 2 + z_range[None, :]
+            z_dst = row_indices[:, None] * z_row_stride + head_id * (HEAD_V * 2) + z_range[None, :]
+            z_data = tl.load(mixed_qkvz + z_src, mask=row_mask[:, None])
+            tl.store(z + z_dst, z_data, mask=row_mask[:, None])
+
+            ba_head_offset = head_id * 4
+            b_range = tl.arange(0, 2)
+            b_src = row_indices[:, None] * ba_row_stride + ba_head_offset + b_range[None, :]
+            b_dst = row_indices[:, None] * ba_out_row_stride + head_id * 2 + b_range[None, :]
+            b_data = tl.load(mixed_ba + b_src, mask=row_mask[:, None])
+            tl.store(b + b_dst, b_data, mask=row_mask[:, None])
+
+            a_src = row_indices[:, None] * ba_row_stride + ba_head_offset + 2 + b_range[None, :]
+            a_data = tl.load(mixed_ba + a_src, mask=row_mask[:, None])
+            tl.store(a + b_dst, a_data, mask=row_mask[:, None])
+
+        row_offset += ROWS_PER_ITER
+
+
+@triton.jit(do_not_specialize=["total_rows", "rows_per_vec",
+                                "num_heads_qk", "num_heads_v",
+                                "qkvz_row_stride", "ba_row_stride",
+                                "qkv_row_stride", "z_row_stride",
+                                "ba_out_row_stride"])
+def fused_qkvzba_split_reshape_cat_gqa_r3_kernel(
+    mixed_qkv,
+    z,
+    b,
+    a,
+    mixed_qkvz,
+    mixed_ba,
+    num_heads_qk,
+    num_heads_v,
+    total_rows,
+    rows_per_vec,
+    qkvz_row_stride,
+    ba_row_stride,
+    qkv_row_stride,
+    z_row_stride,
+    ba_out_row_stride,
+    HEAD_QK: tl.constexpr,
+    HEAD_V: tl.constexpr,
+    ROWS_PER_ITER: tl.constexpr,
+):
+    vec_id = tl.program_id(0)
+
+    row_start = vec_id * rows_per_vec
+    row_end = tl.minimum(row_start + rows_per_vec, total_rows)
+
+    row_offset = row_start
+    iter_count = (row_end - row_start + ROWS_PER_ITER - 1) // ROWS_PER_ITER
+
+    for _ in tl.range(iter_count):
+        row_indices = tl.arange(0, ROWS_PER_ITER) + row_offset
+        row_mask = row_indices < row_end
+
+        for head_id in tl.range(num_heads_qk):
+            src_head_offset = head_id * (HEAD_QK * 2 + HEAD_V * 6)
+
+            q_range = tl.arange(0, HEAD_QK)
+            q_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + q_range[None, :]
+            q_dst = row_indices[:, None] * qkv_row_stride + head_id * HEAD_QK + q_range[None, :]
+            q_data = tl.load(mixed_qkvz + q_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + q_dst, q_data, mask=row_mask[:, None])
+
+            k_range = tl.arange(0, HEAD_QK)
+            k_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK + k_range[None, :]
+            k_dst = row_indices[:, None] * qkv_row_stride + num_heads_qk * HEAD_QK + head_id * HEAD_QK + k_range[None, :]
+            k_data = tl.load(mixed_qkvz + k_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + k_dst, k_data, mask=row_mask[:, None])
+
+            v_range = tl.arange(0, HEAD_V * 3)
+            v_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + v_range[None, :]
+            v_dst = row_indices[:, None] * qkv_row_stride + num_heads_qk * HEAD_QK * 2 + head_id * (HEAD_V * 3) + v_range[None, :]
+            v_data = tl.load(mixed_qkvz + v_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + v_dst, v_data, mask=row_mask[:, None])
+
+            z_range = tl.arange(0, HEAD_V * 3)
+            z_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + HEAD_V * 3 + z_range[None, :]
+            z_dst = row_indices[:, None] * z_row_stride + head_id * (HEAD_V * 3) + z_range[None, :]
+            z_data = tl.load(mixed_qkvz + z_src, mask=row_mask[:, None])
+            tl.store(z + z_dst, z_data, mask=row_mask[:, None])
+
+            ba_head_offset = head_id * 6
+            b_range = tl.arange(0, 3)
+            b_src = row_indices[:, None] * ba_row_stride + ba_head_offset + b_range[None, :]
+            b_dst = row_indices[:, None] * ba_out_row_stride + head_id * 3 + b_range[None, :]
+            b_data = tl.load(mixed_ba + b_src, mask=row_mask[:, None])
+            tl.store(b + b_dst, b_data, mask=row_mask[:, None])
+
+            a_src = row_indices[:, None] * ba_row_stride + ba_head_offset + 3 + b_range[None, :]
+            a_data = tl.load(mixed_ba + a_src, mask=row_mask[:, None])
+            tl.store(a + b_dst, a_data, mask=row_mask[:, None])
+
+        row_offset += ROWS_PER_ITER
+
+
+@triton.jit(do_not_specialize=["total_rows", "rows_per_vec",
+                                "num_heads_qk", "num_heads_v",
+                                "qkvz_row_stride", "ba_row_stride",
+                                "qkv_row_stride", "z_row_stride",
+                                "ba_out_row_stride"])
+def fused_qkvzba_split_reshape_cat_gqa_r4_kernel(
+    mixed_qkv,
+    z,
+    b,
+    a,
+    mixed_qkvz,
+    mixed_ba,
+    num_heads_qk,
+    num_heads_v,
+    total_rows,
+    rows_per_vec,
+    qkvz_row_stride,
+    ba_row_stride,
+    qkv_row_stride,
+    z_row_stride,
+    ba_out_row_stride,
+    HEAD_QK: tl.constexpr,
+    HEAD_V: tl.constexpr,
+    ROWS_PER_ITER: tl.constexpr,
+):
+    vec_id = tl.program_id(0)
+
+    row_start = vec_id * rows_per_vec
+    row_end = tl.minimum(row_start + rows_per_vec, total_rows)
+
+    row_offset = row_start
+    iter_count = (row_end - row_start + ROWS_PER_ITER - 1) // ROWS_PER_ITER
+
+    for _ in tl.range(iter_count):
+        row_indices = tl.arange(0, ROWS_PER_ITER) + row_offset
+        row_mask = row_indices < row_end
+
+        for head_id in tl.range(num_heads_qk):
+            src_head_offset = head_id * (HEAD_QK * 2 + HEAD_V * 8)
+
+            q_range = tl.arange(0, HEAD_QK)
+            q_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + q_range[None, :]
+            q_dst = row_indices[:, None] * qkv_row_stride + head_id * HEAD_QK + q_range[None, :]
+            q_data = tl.load(mixed_qkvz + q_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + q_dst, q_data, mask=row_mask[:, None])
+
+            k_range = tl.arange(0, HEAD_QK)
+            k_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK + k_range[None, :]
+            k_dst = row_indices[:, None] * qkv_row_stride + num_heads_qk * HEAD_QK + head_id * HEAD_QK + k_range[None, :]
+            k_data = tl.load(mixed_qkvz + k_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + k_dst, k_data, mask=row_mask[:, None])
+
+            v_range = tl.arange(0, HEAD_V * 4)
+            v_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + v_range[None, :]
+            v_dst = row_indices[:, None] * qkv_row_stride + num_heads_qk * HEAD_QK * 2 + head_id * (HEAD_V * 4) + v_range[None, :]
+            v_data = tl.load(mixed_qkvz + v_src, mask=row_mask[:, None])
+            tl.store(mixed_qkv + v_dst, v_data, mask=row_mask[:, None])
+
+            z_range = tl.arange(0, HEAD_V * 4)
+            z_src = row_indices[:, None] * qkvz_row_stride + src_head_offset + HEAD_QK * 2 + HEAD_V * 4 + z_range[None, :]
+            z_dst = row_indices[:, None] * z_row_stride + head_id * (HEAD_V * 4) + z_range[None, :]
+            z_data = tl.load(mixed_qkvz + z_src, mask=row_mask[:, None])
+            tl.store(z + z_dst, z_data, mask=row_mask[:, None])
+
+            ba_head_offset = head_id * 8
+            b_range = tl.arange(0, 4)
+            b_src = row_indices[:, None] * ba_row_stride + ba_head_offset + b_range[None, :]
+            b_dst = row_indices[:, None] * ba_out_row_stride + head_id * 4 + b_range[None, :]
+            b_data = tl.load(mixed_ba + b_src, mask=row_mask[:, None])
+            tl.store(b + b_dst, b_data, mask=row_mask[:, None])
+
+            a_src = row_indices[:, None] * ba_row_stride + ba_head_offset + 4 + b_range[None, :]
+            a_data = tl.load(mixed_ba + a_src, mask=row_mask[:, None])
+            tl.store(a + b_dst, a_data, mask=row_mask[:, None])
+
+        row_offset += ROWS_PER_ITER
+
+
+def get_fused_qkvzba_split_reshape_kernel(v_heads_per_qk: int):
+    if v_heads_per_qk == 1:
+        return fused_qkvzba_split_reshape_cat_gqa_r1_kernel
+    if v_heads_per_qk == 2:
+        return fused_qkvzba_split_reshape_cat_gqa_r2_kernel
+    if v_heads_per_qk == 3:
+        return fused_qkvzba_split_reshape_cat_gqa_r3_kernel
+    if v_heads_per_qk == 4:
+        return fused_qkvzba_split_reshape_cat_gqa_r4_kernel
+    raise ValueError(
+        f"Unsupported v_heads_per_qk={v_heads_per_qk}, "
+        f"expected one of {SUPPORTED_V_HEADS_PER_QK}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +382,12 @@ def fused_qkvzba_split_reshape_cat(
     total_rows = batch  
 
     v_heads_per_qk = num_heads_v // num_heads_qk
+    if v_heads_per_qk not in SUPPORTED_V_HEADS_PER_QK:
+        raise ValueError(
+            f"Unsupported v_heads_per_qk={v_heads_per_qk}, "
+            f"expected one of {SUPPORTED_V_HEADS_PER_QK}"
+        )
+
     v_dim_per_qk = v_heads_per_qk * head_v
     qkvz_dim_t = head_qk * 2 + v_dim_per_qk * 2
     ba_dim_t = v_heads_per_qk * 2
@@ -176,7 +429,8 @@ def fused_qkvzba_split_reshape_cat(
     rows_per_iter = 1
 
     grid = (grid_size, 1)
-    fused_qkvzba_split_reshape_cat_kernel[grid](
+    kernel = get_fused_qkvzba_split_reshape_kernel(v_heads_per_qk)
+    kernel[grid](
         mixed_qkv,
         z,
         b,
@@ -194,10 +448,6 @@ def fused_qkvzba_split_reshape_cat(
         ba_out_row_stride,
         head_qk,
         head_v,
-        v_heads_per_qk,
-        v_dim_per_qk,
-        head_qk * 2 + v_dim_per_qk * 2,  # QKVZ_DIM_T
-        v_heads_per_qk * 2,              # BA_DIM_T
         rows_per_iter,
     )
 
@@ -258,29 +508,32 @@ def fused_qkvzba_split_reshape_cat_ref(
 
 # ---------------------------------------------------------------------------
 # pytest cases
-# Typical Qwen3-Next GatedDeltaNet configurations (after TP split):
-#   num_heads_qk in {8, 16}, num_heads_v = 2 * num_heads_qk
+# Typical Qwen3.5 GatedDeltaNet configurations (after TP split):
+#   official checkpoints cover v_heads_per_qk in {1, 2, 3, 4}
 #   head_qk = head_v = 128
 # ---------------------------------------------------------------------------
 
-# num_heads_qk/num_heads_v are now do_not_specialize so different values of
-# those parameters reuse the same kernel binary.  All combinations below will
-# compile into a single .npubin.
+# num_heads_qk/num_heads_v are do_not_specialize within each ratio-specific
+# kernel, so the cases below compile into four .npubin files: gqa_r1..gqa_r4.
 @pytest.mark.parametrize("batch, num_heads_qk, num_heads_v, head_qk, head_v", [
     # (batch, nqk, nv, hqk, hv)
     (1,   8, 16, 128, 128),
     (4,   8, 16, 128, 128),
     (8,   8, 16, 128, 128),
+    (1,  16, 16, 128, 128),
     (1,  16, 32, 128, 128),
+    (1,  16, 48, 128, 128),
+    (1,  16, 64, 128, 128),
     (4,  16, 32, 128, 128),
     (8,  16, 32, 128, 128),
     # TP=8
     (4096,  2,  4, 128, 128),
-
+    (4096, 16, 16, 128, 128),
     (4096,  4,  8, 128, 128),
     (4096,  8,  16, 128, 128),
     (4096, 16,  32, 128, 128),
-
+    (4096, 16,  48, 128, 128),
+    (4096, 16,  64, 128, 128),
 ])
 def test_fused_qkvzba_split_reshape(
     batch: int,

@@ -36,6 +36,17 @@
 
 namespace xllm::kernel::npu {
 
+namespace {
+
+constexpr const char* kFusedQkvzbaSplitReshapeKernels[] = {
+    "fused_qkvzba_split_reshape_cat_gqa_r1_kernel",
+    "fused_qkvzba_split_reshape_cat_gqa_r2_kernel",
+    "fused_qkvzba_split_reshape_cat_gqa_r3_kernel",
+    "fused_qkvzba_split_reshape_cat_gqa_r4_kernel",
+};
+
+}  // namespace
+
 constexpr int32_t kDeviceId = 0;
 // bfloat16 precision tolerance
 constexpr float kTolerance = 2e-2f;
@@ -109,13 +120,15 @@ class TritonFusedQkvzbaSplitReshapeTest
       torch::zeros({1}, torch::TensorOptions().device("npu:0"));
       torch_npu::init_npu("npu:" + std::to_string(kDeviceId));
       auto& reg = KernelRegistry::get_instance();
-      std::string binary_path =
-          GetKernelBinaryPath("fused_qkvzba_split_reshape_cat_kernel.npubin");
-      npu_initialized_ =
-          reg.register_kernel("fused_qkvzba_split_reshape_cat_kernel",
-                              binary_path) &&
-          reg.get_kernel_stub("fused_qkvzba_split_reshape_cat_kernel") !=
-              nullptr;
+      npu_initialized_ = true;
+      for (const char* kernel_name : kFusedQkvzbaSplitReshapeKernels) {
+        std::string binary_path =
+            GetKernelBinaryPath(std::string(kernel_name) + ".npubin");
+        npu_initialized_ =
+            npu_initialized_ &&
+            reg.register_kernel(kernel_name, binary_path) &&
+            reg.get_kernel_stub(kernel_name) != nullptr;
+      }
     } catch (...) {
       npu_initialized_ = false;
     }
@@ -230,14 +243,20 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(1,  8, 16, 128, 128),
         std::make_tuple(4,  8, 16, 128, 128),
         std::make_tuple(8,  8, 16, 128, 128),
+        std::make_tuple(1, 16, 16, 128, 128),
         std::make_tuple(1, 16, 32, 128, 128),
+        std::make_tuple(1, 16, 48, 128, 128),
+        std::make_tuple(1, 16, 64, 128, 128),
         std::make_tuple(4, 16, 32, 128, 128),
         std::make_tuple(8, 16, 32, 128, 128),
         // Larger batches to exercise >65535-token code path
         std::make_tuple(4096,  2,  4, 128, 128),
+        std::make_tuple(4096, 16, 16, 128, 128),
         std::make_tuple(4096,  4,  8, 128, 128),
         std::make_tuple(4096,  8,  16, 128, 128),
         std::make_tuple(4096, 16,  32, 128, 128),
+        std::make_tuple(4096, 16,  48, 128, 128),
+        std::make_tuple(4096, 16,  64, 128, 128),
         std::make_tuple(256,  8, 16, 128, 128)));
 
 }  // namespace xllm::kernel::npu

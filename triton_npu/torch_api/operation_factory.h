@@ -100,9 +100,24 @@ class OperationFactory final {
         "_causal_conv1d_update_kernel_npu_tiled_v2");
   }
 
-  FusedQkvzbaSplitReshapeOp& fused_qkvzba_split_reshape() {
-    return get_or_create<FusedQkvzbaSplitReshapeOp>(
-        "fused_qkvzba_split_reshape_cat_kernel");
+  FusedQkvzbaSplitReshapeGqaR1Op& fused_qkvzba_split_reshape_gqa_r1() {
+    return get_or_create<FusedQkvzbaSplitReshapeGqaR1Op>(
+        "fused_qkvzba_split_reshape_cat_gqa_r1_kernel");
+  }
+
+  FusedQkvzbaSplitReshapeGqaR2Op& fused_qkvzba_split_reshape_gqa_r2() {
+    return get_or_create<FusedQkvzbaSplitReshapeGqaR2Op>(
+        "fused_qkvzba_split_reshape_cat_gqa_r2_kernel");
+  }
+
+  FusedQkvzbaSplitReshapeGqaR3Op& fused_qkvzba_split_reshape_gqa_r3() {
+    return get_or_create<FusedQkvzbaSplitReshapeGqaR3Op>(
+        "fused_qkvzba_split_reshape_cat_gqa_r3_kernel");
+  }
+
+  FusedQkvzbaSplitReshapeGqaR4Op& fused_qkvzba_split_reshape_gqa_r4() {
+    return get_or_create<FusedQkvzbaSplitReshapeGqaR4Op>(
+        "fused_qkvzba_split_reshape_cat_gqa_r4_kernel");
   }
 
  private:
