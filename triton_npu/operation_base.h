@@ -17,18 +17,95 @@
 #pragma once
 
 #include <acl/acl.h>
+#include <dlfcn.h>
 #include <glog/logging.h>
+#include <unistd.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "args_builder.h"
 #include "kernel_registry.h"
 
 namespace xllm::kernel::npu {
+
+inline bool is_regular_file_path(const std::filesystem::path& path) {
+  std::error_code error_code;
+  return std::filesystem::is_regular_file(path, error_code);
+}
+
+inline void append_unique_path(std::vector<std::filesystem::path>* paths,
+                               const std::filesystem::path& path) {
+  if (path.empty()) {
+    return;
+  }
+
+  std::filesystem::path normalized_path = path.lexically_normal();
+  for (const auto& existing_path : *paths) {
+    if (existing_path == normalized_path) {
+      return;
+    }
+  }
+  paths->push_back(std::move(normalized_path));
+}
+
+inline void append_env_binary_root(std::vector<std::filesystem::path>* paths,
+                                   const char* env_name) {
+  const char* env_value = std::getenv(env_name);
+  if (env_value == nullptr || env_value[0] == '\0') {
+    return;
+  }
+  append_unique_path(paths, std::filesystem::path(env_value));
+}
+
+inline std::filesystem::path get_current_object_dir() {
+  Dl_info dl_info{};
+  if (dladdr(reinterpret_cast<const void*>(&get_current_object_dir),
+             &dl_info) == 0 ||
+      dl_info.dli_fname == nullptr) {
+    return {};
+  }
+
+  return std::filesystem::path(dl_info.dli_fname).parent_path();
+}
+
+inline std::filesystem::path get_executable_dir() {
+  std::vector<char> buffer(/*capacity=*/4096, '\0');
+  ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+  if (length <= 0) {
+    return {};
+  }
+
+  return std::filesystem::path(std::string(buffer.data(), length))
+      .parent_path();
+}
+
+inline std::vector<std::filesystem::path> get_candidate_binary_roots() {
+  std::vector<std::filesystem::path> roots;
+
+  append_env_binary_root(&roots, "TRITON_BINARY_PATH");
+
+  std::filesystem::path current_object_dir = get_current_object_dir();
+  if (!current_object_dir.empty()) {
+    append_unique_path(&roots, current_object_dir / "triton_npu" / "binary");
+  }
+
+  std::filesystem::path executable_dir = get_executable_dir();
+  if (!executable_dir.empty()) {
+    append_unique_path(&roots, executable_dir / "triton_npu" / "binary");
+  }
+
+#ifdef TRITON_BINARY_PATH
+  append_unique_path(&roots, std::filesystem::path(TRITON_BINARY_PATH));
+#endif
+
+  return roots;
+}
 
 class OperationBase {
  public:
@@ -151,10 +228,18 @@ class OperationBase {
     if (!npubin_path_.empty()) {
       return npubin_path_;
     }
+
+    std::string kernel_file_name = kernel_name_ + ".npubin";
+    for (const auto& binary_root : get_candidate_binary_roots()) {
+      std::filesystem::path candidate_path = binary_root / kernel_file_name;
+      if (is_regular_file_path(candidate_path)) {
+        return candidate_path.string();
+      }
+    }
+
 #ifdef TRITON_BINARY_PATH
-    std::filesystem::path p(TRITON_BINARY_PATH);
-    p /= (kernel_name_ + ".npubin");
-    return p.string();
+    return (std::filesystem::path(TRITON_BINARY_PATH) / kernel_file_name)
+        .string();
 #else
     return {};
 #endif
