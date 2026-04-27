@@ -48,6 +48,62 @@ class OperationFactory final {
     return get_or_create<LayerNormFwdOp>("layer_norm_fwd_kernel");
   }
 
+  LayerNormFwdFastOp& layer_norm_fwd_fast() {
+    return get_or_create<LayerNormFwdFastOp>("layer_norm_fwd_kernel_fast");
+  }
+
+  LayerNormFwdFastRMSBiasOp& layer_norm_fwd_fast_rms_bias() {
+    return get_or_create<LayerNormFwdFastRMSBiasOp>(
+        "layer_norm_fwd_kernel_fast_rms_bias");
+  }
+
+  LayerNormFwdFastRMSNoBiasOp& layer_norm_fwd_fast_rms_nobias() {
+    return get_or_create<LayerNormFwdFastRMSNoBiasOp>(
+        "layer_norm_fwd_kernel_fast_rms_nobias");
+  }
+
+  LayerNormFwdFastBF16Op& layer_norm_fwd_fast_bf16() {
+    return get_or_create<LayerNormFwdFastBF16Op>("layer_norm_fwd_kernel_fast_bf16");
+  }
+
+  LayerNormFwdFastRMSBF16BiasOp& layer_norm_fwd_fast_rms_bf16_bias() {
+    return get_or_create<LayerNormFwdFastRMSBF16BiasOp>(
+        "layer_norm_fwd_kernel_fast_rms_bf16_bias");
+  }
+
+  LayerNormFwdFastRMSBF16NoBiasOp& layer_norm_fwd_fast_rms_bf16_nobias() {
+    return get_or_create<LayerNormFwdFastRMSBF16NoBiasOp>(
+        "layer_norm_fwd_kernel_fast_rms_bf16_nobias");
+  }
+
+  LayerNormFwdFastZOp& layer_norm_fwd_fast_z() {
+    return get_or_create<LayerNormFwdFastZOp>("layer_norm_fwd_kernel_fast_z");
+  }
+
+  LayerNormFwdFastRMSZBiasOp& layer_norm_fwd_fast_rms_z_bias() {
+    return get_or_create<LayerNormFwdFastRMSZBiasOp>(
+        "layer_norm_fwd_kernel_fast_rms_z_bias");
+  }
+
+  LayerNormFwdFastRMSZNoBiasOp& layer_norm_fwd_fast_rms_z_nobias() {
+    return get_or_create<LayerNormFwdFastRMSZNoBiasOp>(
+        "layer_norm_fwd_kernel_fast_rms_z_nobias");
+  }
+
+  LayerNormFwdFastBF16ZOp& layer_norm_fwd_fast_bf16_z() {
+    return get_or_create<LayerNormFwdFastBF16ZOp>("layer_norm_fwd_kernel_fast_bf16_z");
+  }
+
+  LayerNormFwdFastRMSBF16ZBiasOp& layer_norm_fwd_fast_rms_bf16_z_bias() {
+    return get_or_create<LayerNormFwdFastRMSBF16ZBiasOp>(
+        "layer_norm_fwd_kernel_fast_rms_bf16_z_bias");
+  }
+
+  LayerNormFwdFastRMSBF16ZNoBiasOp& layer_norm_fwd_fast_rms_bf16_z_nobias() {
+    return get_or_create<LayerNormFwdFastRMSBF16ZNoBiasOp>(
+        "layer_norm_fwd_kernel_fast_rms_bf16_z_nobias");
+  }
+
   RecurrentGatedDeltaRuleFwdOp& recurrent_gated_delta_rule_fwd() {
     return get_or_create<RecurrentGatedDeltaRuleFwdOp>(
         "fused_recurrent_gated_delta_rule_fwd_kernel");

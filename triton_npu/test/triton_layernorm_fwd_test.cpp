@@ -116,50 +116,59 @@ torch::Tensor layer_norm_golden_cpu(
 
 class TritonLayerNormFwdTest : public ::testing::Test {
  protected:
-  void SetUp() override {
+  static bool npu_initialized_;
+
+  static void SetUpTestSuite() {
     try {
       torch::zeros({1}, torch::TensorOptions().device("npu:0"));
-      tensor_options_ =
-          torch::TensorOptions().dtype(torch::kFloat16).device("npu:0");
-      npu_available_ = true;
+      torch_npu::init_npu("npu:" + std::to_string(kDeviceId));
+
+      auto& reg = KernelRegistry::get_instance();
+
+      // Register fallback kernel
+      std::string binary_path =
+          GetKernelBinaryPath("layer_norm_fwd_kernel.npubin");
+      npu_initialized_ =
+          reg.register_kernel("layer_norm_fwd_kernel", binary_path) &&
+          reg.get_kernel_stub("layer_norm_fwd_kernel") != nullptr;
+
+      // Register fast kernel
+      std::string fast_binary_path =
+          GetKernelBinaryPath("layer_norm_fwd_kernel_fast.npubin");
+      npu_initialized_ =
+          npu_initialized_ &&
+          reg.register_kernel("layer_norm_fwd_kernel_fast", fast_binary_path) &&
+          reg.get_kernel_stub("layer_norm_fwd_kernel_fast") != nullptr;
     } catch (...) {
-      tensor_options_ =
-          torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCPU);
-      npu_available_ = false;
-      return;
+      npu_initialized_ = false;
     }
-
-    kernel_name_ = "layer_norm_fwd_kernel";
-    binary_filename_ = "layer_norm_fwd_kernel.npubin";
-
-    torch::manual_seed(42);
-    torch_npu::init_npu(device_str_);
-
-    binary_path_ = GetKernelBinaryPath(binary_filename_);
-    auto& reg = KernelRegistry::get_instance();
-    ASSERT_TRUE(reg.register_kernel(kernel_name_, binary_path_))
-        << "Failed to register kernel: " << kernel_name_ << " from "
-        << binary_path_;
-    ASSERT_NE(reg.get_kernel_stub(kernel_name_), nullptr)
-        << "Failed to get kernel stub: " << kernel_name_;
   }
 
-  void TearDown() override {
-    if (npu_available_) {
+  static void TearDownTestSuite() {
+    if (npu_initialized_) {
       try {
+        KernelRegistry::get_instance().cleanup();
         torch_npu::finalize_npu();
       } catch (...) {
       }
     }
   }
 
-  torch::TensorOptions tensor_options_;
+  void SetUp() override {
+    npu_available_ = npu_initialized_;
+    if (!npu_available_) {
+      return;
+    }
+    torch::manual_seed(42);
+  }
+
+  void TearDown() override {}
+
   bool npu_available_ = false;
   std::string device_str_ = "npu:" + std::to_string(kDeviceId);
-  std::string binary_filename_;
-  std::string kernel_name_;
-  std::string binary_path_;
 };
+
+bool TritonLayerNormFwdTest::npu_initialized_ = false;
 
 // (2, 8, 128, False, True, True, false, None),
 // x shape:[2*8, 128]
@@ -168,6 +177,46 @@ class TritonLayerNormFwdTest : public ::testing::Test {
 // group_size:None
 // norm_before_gate = true
 // bool is_rms_norm = false
+TEST_F(TritonLayerNormFwdTest, KernelTestFast) {
+  if (!npu_available_) {
+    GTEST_SKIP() << "NPU device not available";
+  }
+
+  auto device = at::Device(device_str_);
+
+  // Shape targeting fast kernel: group_size=128, no z, not rms_norm
+  int64_t batch_size = 32768;
+  int64_t seq_len = 1;
+  int64_t hidden_dim = 128;
+  float eps = 1e-6;
+  int64_t group_size = hidden_dim;
+
+  auto tensor_options =
+      torch::TensorOptions().dtype(torch::kFloat32).device(device);
+
+  auto x = torch::randn({batch_size, seq_len, hidden_dim}, tensor_options);
+  auto weight = torch::randn({hidden_dim}, tensor_options);
+  auto bias = torch::randn({hidden_dim}, tensor_options);
+  std::optional<torch::Tensor> z_optional;
+
+  auto output_golden = layer_norm_golden_cpu(
+      x, weight, bias, eps, z_optional, group_size, true, false);
+  auto npu_stream = c10_npu::getCurrentNPUStream(0);
+  auto output = xllm::kernel::npu::layer_norm_fwd(
+      x, weight, bias, eps, z_optional, group_size, true, false);
+  aclrtSynchronizeStream(npu_stream.stream());
+
+  auto output_golden_cpu = output_golden.cpu().contiguous();
+  auto output_cpu = output.cpu().contiguous();
+
+  auto output_diff = torch::abs(output_cpu - output_golden_cpu);
+  float output_max_diff = torch::max(output_diff).item().to<float>();
+
+  EXPECT_LT(output_max_diff, kTolerance)
+      << "Fast LayerNorm output max diff (" << output_max_diff
+      << ") > tolerance (" << kTolerance << ")";
+}
+
 TEST_F(TritonLayerNormFwdTest, KernelTest2) {
   if (!npu_available_) {
     GTEST_SKIP() << "NPU device not available";
@@ -181,7 +230,6 @@ TEST_F(TritonLayerNormFwdTest, KernelTest2) {
   float eps = 1e-6;
   int64_t group_size = hidden_dim;
 
-  auto dtype = torch::kFloat32;
   auto tensor_options =
       torch::TensorOptions().dtype(torch::kFloat32).device(device);
 
@@ -207,6 +255,51 @@ TEST_F(TritonLayerNormFwdTest, KernelTest2) {
   EXPECT_LT(output_max_diff, kTolerance)
       << "LayerNorm output max diff (" << output_max_diff << ") > tolerance ("
       << kTolerance << ")";
+}
+
+// ---------------------------------------------------------------------------
+// Performance comparison: same (32768, 128) shape on both fast & fallback
+// ---------------------------------------------------------------------------
+TEST_F(TritonLayerNormFwdTest, KernelTestFallbackLarge) {
+  if (!npu_available_) {
+    GTEST_SKIP() << "NPU device not available";
+  }
+
+  auto device = at::Device(device_str_);
+
+  int64_t batch_size = 32768;
+  int64_t seq_len = 1;
+  int64_t hidden_dim = 128;
+  float eps = 1e-6;
+  int64_t group_size = hidden_dim;
+
+  auto tensor_options =
+      torch::TensorOptions().dtype(torch::kFloat32).device(device);
+
+  auto x = torch::randn({batch_size, seq_len, hidden_dim}, tensor_options);
+  auto weight = torch::randn({hidden_dim}, tensor_options);
+  torch::Tensor bias;
+  auto z = torch::randn({batch_size, seq_len, hidden_dim}, tensor_options);
+  std::optional<torch::Tensor> z_optional = z;
+
+  // Force fallback path via is_rms_norm=true (z is provided to match the
+  // existing AOT binary signature which was compiled with HAS_Z=True)
+  auto output_golden = layer_norm_golden_cpu(
+      x, weight, bias, eps, z_optional, group_size, true, true);
+  auto npu_stream = c10_npu::getCurrentNPUStream(0);
+  auto output = xllm::kernel::npu::layer_norm_fwd(
+      x, weight, bias, eps, z_optional, group_size, true, true);
+  aclrtSynchronizeStream(npu_stream.stream());
+
+  auto output_golden_cpu = output_golden.cpu().contiguous();
+  auto output_cpu = output.cpu().contiguous();
+
+  auto output_diff = torch::abs(output_cpu - output_golden_cpu);
+  float output_max_diff = torch::max(output_diff).item().to<float>();
+
+  EXPECT_LT(output_max_diff, kTolerance)
+      << "Fallback (large) LayerNorm output max diff (" << output_max_diff
+      << ") > tolerance (" << kTolerance << ")";
 }
 
 }  // namespace xllm::kernel::npu

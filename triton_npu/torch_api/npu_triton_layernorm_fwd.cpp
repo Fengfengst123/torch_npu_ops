@@ -28,6 +28,23 @@ inline int64_t next_power_of_2(int64_t n) {
   return 1LL << (64 - __builtin_clzll(val ? val : 1));
 }
 
+// ---------------------------------------------------------------------------
+// Helper: query available Vector Core count from the NPU where the tensor
+// resides.  Uses the tensor's device index explicitly instead of relying on
+// the thread's current ACL context.
+// ---------------------------------------------------------------------------
+static int32_t get_vectorcore_num(const torch::Tensor& x) {
+  int32_t device_id = static_cast<int32_t>(x.device().index());
+  int64_t vec_core_num = 0;
+  const aclError ret = aclrtGetDeviceInfo(
+      static_cast<uint32_t>(device_id), ACL_DEV_ATTR_VECTOR_CORE_NUM,
+      &vec_core_num);
+  if (ret == ACL_SUCCESS && vec_core_num > 0) {
+    return static_cast<int32_t>(vec_core_num);
+  }
+  return 20;  // fallback for older CANN versions
+}
+
 torch::Tensor layer_norm_fwd(torch::Tensor& x,
                              torch::Tensor& weight,
                              torch::Tensor& bias,
@@ -36,31 +53,20 @@ torch::Tensor layer_norm_fwd(torch::Tensor& x,
                              int64_t group_size,
                              bool norm_before_gate,
                              bool is_rms_norm) {
-  // TORCH_CHECK(x.dtype() == torch::kFloat32, "x must be float32");
-  // TORCH_CHECK(weight.dtype() == torch::kFloat32, "weight must be float32");
-
   c10::IntArrayRef x_shape_og = x.sizes();
   int64_t last_dim = x.size(-1);
   torch::Tensor x_2d = x.reshape({-1, last_dim});
-
-  // TORCH_CHECK(x_2d.stride(-1) == 1, "x stride(-1) must be 1");
-  // TORCH_CHECK(x_2d.dim() == 2, "x must be 2-dimensional (M, N)");
 
   const auto M = x_2d.size(0);
   const auto N = x_2d.size(1);
 
   const int64_t group_size_val = group_size;
-  // TORCH_CHECK(N % group_size_val == 0, "N must be divisible by group_size");
   const int64_t ngroups = N / group_size_val;
 
   torch::Tensor z_2d;
   if (z.has_value()) {
     z_2d = z->reshape({-1, last_dim});
   }
-
-  // TORCH_CHECK(weight.dim() == 1 && weight.size(0) == N,
-  //            "weight must be 1-dimensional with size N");
-  // TORCH_CHECK(weight.stride(-1) == 1, "weight stride(-1) must be 1");
 
   torch::Tensor out_tensor = torch::empty_like(x_2d);
   torch::Tensor mean, rstd;
@@ -71,20 +77,8 @@ torch::Tensor layer_norm_fwd(torch::Tensor& x,
   rstd = torch::empty({ngroups * M},
                       torch::dtype(torch::kFloat32).device(x.device()));
 
-  const int64_t elem_size = x.element_size();
-  const int64_t MAX_FUSED_SIZE = MAX_FUSED_BYTES / elem_size;
-  const int64_t BLOCK_N =
-      std::min(MAX_FUSED_SIZE, next_power_of_2(group_size_val));
-
-  const int64_t warp_base = BLOCK_N / 256;
-  const int64_t num_warps = std::clamp<int64_t>(warp_base, 1, 8);
-
   auto npuStream = c10_npu::getCurrentNPUStream();
   rtStream_t stream = static_cast<rtStream_t>(npuStream.stream());
-
-  int32_t gridCoreNum = std::min(M, MAX_CORES);
-  int32_t gridNgroups = ngroups;
-  int32_t gridZ = 1;
 
   void* x_2dPtr = x_2d.data_ptr();
   void* out_tensorPtr = out_tensor.data_ptr();
@@ -109,21 +103,217 @@ torch::Tensor layer_norm_fwd(torch::Tensor& x,
     stride_z_row = z_2d.stride(0);
   }
 
-  auto& op = OperationFactory::instance().layer_norm_fwd();
+  // -------------------------------------------------------------------------
+  // Multi-kernel dispatch (refer to npu_triton_causal_conv1d_update.cpp)
+  // -------------------------------------------------------------------------
+  // Fast kernel:  group_size <= 128
+  // Fallback:     everything else (original implementation)
+  // -------------------------------------------------------------------------
+  const bool use_fast_kernel = (group_size_val <= 128);
 
-  auto ret =
-      op.execute(stream, gridCoreNum, gridNgroups, gridZ, [&](ArgsBuilder& ab) {
+  if (use_fast_kernel) {
+    const int32_t num_vectorcore = get_vectorcore_num(x);
+    const int32_t gridX =
+        static_cast<int32_t>(std::max<int64_t>(1, std::min<int64_t>(num_vectorcore, M)));
+    const int32_t gridY = static_cast<int32_t>(ngroups);
+    const int32_t gridZ = 1;
+
+    const bool is_bf16 = (x.scalar_type() == torch::kBFloat16);
+    const bool has_z = z.has_value();
+    const bool has_bias = bias.defined();
+
+    if (has_z) {
+      // Fast kernel with Z (HAS_Z=True, 7 pointer args including Z)
+      OperationBase& op = [&]() -> OperationBase& {
+        if (is_rms_norm) {
+          if (is_bf16) {
+            return has_bias
+                ? static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_bf16_z_bias())
+                : static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_bf16_z_nobias());
+          }
+          return has_bias
+              ? static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_z_bias())
+              : static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_z_nobias());
+        } else {
+          return is_bf16
+              ? static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_bf16_z())
+              : static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_z());
+        }
+      }();
+      if (is_rms_norm) {
+        rtError_t ret =
+            op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+              if (has_bias) {
+                ab.constructArgs(x_2dPtr,
+                                 out_tensorPtr,
+                                 weightPtr,
+                                 biasPtr,
+                                 z_2dPtr,
+                                 rstdPtr,
+                                 stride_x_row,
+                                 stride_y_row,
+                                 stride_z_row,
+                                 static_cast<int32_t>(M),
+                                 static_cast<int32_t>(group_size_val),
+                                 static_cast<float>(eps),
+                                 gridX);
+              } else {
+                ab.constructArgs(x_2dPtr,
+                                 out_tensorPtr,
+                                 weightPtr,
+                                 z_2dPtr,
+                                 rstdPtr,
+                                 stride_x_row,
+                                 stride_y_row,
+                                 stride_z_row,
+                                 static_cast<int32_t>(M),
+                                 static_cast<int32_t>(group_size_val),
+                                 static_cast<float>(eps),
+                                 gridX);
+              }
+            });
+        if (ret != RT_ERROR_NONE) {
+          LOG(ERROR) << "rtKernelLaunch failed for 'layer_norm_fwd_kernel_fast_rms"
+                     << (is_bf16 ? "_bf16" : "") << "_z_"
+                     << (has_bias ? "bias" : "nobias") << "': " << ret;
+        }
+      } else {
+        rtError_t ret =
+            op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+              ab.constructArgs(x_2dPtr,
+                               out_tensorPtr,
+                               weightPtr,
+                               biasPtr,
+                               z_2dPtr,
+                               meanPtr,
+                               rstdPtr,
+                               stride_x_row,
+                               stride_y_row,
+                               stride_z_row,
+                               static_cast<int32_t>(M),
+                               static_cast<int32_t>(group_size_val),
+                               static_cast<float>(eps),
+                               gridX);
+            });
+        if (ret != RT_ERROR_NONE) {
+          LOG(ERROR) << "rtKernelLaunch failed for 'layer_norm_fwd_kernel_fast"
+                     << (is_bf16 ? "_bf16" : "") << "_z': " << ret;
+        }
+      }
+    } else {
+      // Fast kernel without Z (HAS_Z=False, Z pointer optimised out)
+      OperationBase& op = [&]() -> OperationBase& {
+        if (is_rms_norm) {
+          if (is_bf16) {
+            return has_bias
+                ? static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_bf16_bias())
+                : static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_bf16_nobias());
+          }
+          return has_bias
+              ? static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_bias())
+              : static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_nobias());
+        } else {
+          return is_bf16
+              ? static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_bf16())
+              : static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast());
+        }
+      }();
+      if (is_rms_norm) {
+        rtError_t ret =
+            op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+              if (has_bias) {
+                ab.constructArgs(x_2dPtr,
+                                 out_tensorPtr,
+                                 weightPtr,
+                                 biasPtr,
+                                 rstdPtr,
+                                 stride_x_row,
+                                 stride_y_row,
+                                 stride_z_row,
+                                 static_cast<int32_t>(M),
+                                 static_cast<int32_t>(group_size_val),
+                                 static_cast<float>(eps),
+                                 gridX);
+              } else {
+                ab.constructArgs(x_2dPtr,
+                                 out_tensorPtr,
+                                 weightPtr,
+                                 rstdPtr,
+                                 stride_x_row,
+                                 stride_y_row,
+                                 stride_z_row,
+                                 static_cast<int32_t>(M),
+                                 static_cast<int32_t>(group_size_val),
+                                 static_cast<float>(eps),
+                                 gridX);
+              }
+            });
+        if (ret != RT_ERROR_NONE) {
+          LOG(ERROR) << "rtKernelLaunch failed for 'layer_norm_fwd_kernel_fast_rms"
+                     << (is_bf16 ? "_bf16" : "") << "_"
+                     << (has_bias ? "bias" : "nobias") << "': " << ret;
+        }
+      } else {
+        rtError_t ret =
+            op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+              // Note: the AOT binary for the fast kernel was compiled with
+              // HAS_Z=False (z is always None on the fast path) and
+              // HAS_BIAS=True.  Triton-Ascend optimises out the unused Z
+              // pointer, so the binary signature has 6 pointer args instead
+              // of 7.  We must NOT pass z_2dPtr here.
+              ab.constructArgs(x_2dPtr,
+                               out_tensorPtr,
+                               weightPtr,
+                               biasPtr,
+                               meanPtr,
+                               rstdPtr,
+                               stride_x_row,
+                               stride_y_row,
+                               stride_z_row,
+                               static_cast<int32_t>(M),
+                               static_cast<int32_t>(group_size_val),
+                               static_cast<float>(eps),
+                               gridX);  // N_CORES as runtime param
+            });
+        if (ret != RT_ERROR_NONE) {
+          LOG(ERROR) << "rtKernelLaunch failed for 'layer_norm_fwd_kernel_fast"
+                     << (is_bf16 ? "_bf16" : "") << "': " << ret;
+        }
+      }
+    }
+    return out_tensor.reshape(x_shape_og);
+  }
+
+  // -------------------------------------------------------------------------
+  // Fallback kernel (original implementation)
+  // -------------------------------------------------------------------------
+  // NOTE: the existing fallback AOT binary was compiled without biasPtr and
+  // meanPtr in the argument list (those pointers were optimised out by the
+  // Triton compiler because the original pytest exercised HAS_BIAS=False and
+  // IS_RMS_NORM=True).  We must match that signature exactly.
+  const int64_t elem_size = x.element_size();
+  const int64_t MAX_FUSED_SIZE = MAX_FUSED_BYTES / elem_size;
+  const int64_t BLOCK_N =
+      std::min(MAX_FUSED_SIZE, next_power_of_2(group_size_val));
+
+  int32_t gridX =
+      static_cast<int32_t>(std::max<int64_t>(1, std::min<int64_t>(MAX_CORES, M)));
+  int32_t gridY = static_cast<int32_t>(ngroups);
+  int32_t gridZ = 1;
+
+  auto& op = OperationFactory::instance().layer_norm_fwd();
+  rtError_t ret =
+      op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
         ab.constructArgs(x_2dPtr,
                          out_tensorPtr,
                          weightPtr,
                          z_2dPtr,
-                         // meanPtr, in qwen3-next this input won't be needed.
                          rstdPtr,
                          stride_x_row,
                          stride_y_row,
                          stride_z_row,
                          static_cast<int32_t>(M),
-                         static_cast<int32_t>(group_size),
+                         static_cast<int32_t>(group_size_val),
                          static_cast<float>(eps));
       });
   if (ret != RT_ERROR_NONE) {
@@ -131,4 +321,5 @@ torch::Tensor layer_norm_fwd(torch::Tensor& x,
   }
   return out_tensor.reshape(x_shape_og);
 }
+
 }  // namespace xllm::kernel::npu

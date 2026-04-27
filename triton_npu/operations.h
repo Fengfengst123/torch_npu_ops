@@ -42,6 +42,74 @@ class LayerNormFwdOp final : public OperationBase {
   LayerNormFwdOp() : OperationBase("layer_norm_fwd_kernel") {}
 };
 
+class LayerNormFwdFastOp final : public OperationBase {
+ public:
+  LayerNormFwdFastOp() : OperationBase("layer_norm_fwd_kernel_fast") {}
+};
+
+class LayerNormFwdFastRMSBiasOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSBiasOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_bias") {}
+};
+
+class LayerNormFwdFastRMSNoBiasOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSNoBiasOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_nobias") {}
+};
+
+class LayerNormFwdFastBF16Op final : public OperationBase {
+ public:
+  LayerNormFwdFastBF16Op() : OperationBase("layer_norm_fwd_kernel_fast_bf16") {}
+};
+
+class LayerNormFwdFastRMSBF16BiasOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSBF16BiasOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_bf16_bias") {}
+};
+
+class LayerNormFwdFastRMSBF16NoBiasOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSBF16NoBiasOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_bf16_nobias") {}
+};
+
+class LayerNormFwdFastZOp final : public OperationBase {
+ public:
+  LayerNormFwdFastZOp() : OperationBase("layer_norm_fwd_kernel_fast_z") {}
+};
+
+class LayerNormFwdFastRMSZBiasOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSZBiasOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_z_bias") {}
+};
+
+class LayerNormFwdFastRMSZNoBiasOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSZNoBiasOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_z_nobias") {}
+};
+
+class LayerNormFwdFastBF16ZOp final : public OperationBase {
+ public:
+  LayerNormFwdFastBF16ZOp() : OperationBase("layer_norm_fwd_kernel_fast_bf16_z") {}
+};
+
+class LayerNormFwdFastRMSBF16ZBiasOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSBF16ZBiasOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_bf16_z_bias") {}
+};
+
+class LayerNormFwdFastRMSBF16ZNoBiasOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSBF16ZNoBiasOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_bf16_z_nobias") {}
+};
+
 class RecurrentGatedDeltaRuleFwdOp final : public OperationBase {
  public:
   RecurrentGatedDeltaRuleFwdOp()

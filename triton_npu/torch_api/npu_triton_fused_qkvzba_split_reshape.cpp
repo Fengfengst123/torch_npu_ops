@@ -82,11 +82,8 @@ static inline int32_t next_pow2(int32_t n) {
 // Uses aclrtGetDeviceInfo() with ACL_DEV_ATTR_VECTOR_CORE_NUM (= 201),
 // defined in acl/acl_rt.h since CANN 8.x.
 // ---------------------------------------------------------------------------
-static int32_t get_vectorcore_num() {
-  int32_t device_id = 0;
-  if (aclrtGetDevice(&device_id) != ACL_SUCCESS) {
-    return 20;  // no active device context
-  }
+static int32_t get_vectorcore_num(const torch::Tensor& x) {
+  int32_t device_id = static_cast<int32_t>(x.device().index());
   int64_t vec_core_num = 0;
   // ACL_DEV_ATTR_VECTOR_CORE_NUM = 201: number of Vector Cores
   const aclError ret = aclrtGetDeviceInfo(
@@ -170,7 +167,7 @@ npu_fused_qkvzba_split_reshape_cat(
   // -----------------------------------------------------------------------
   // Compute launch parameters (mirror Python wrapper exactly)
   // -----------------------------------------------------------------------
-  const int32_t num_vectorcore = get_vectorcore_num();
+  const int32_t num_vectorcore = get_vectorcore_num(mixed_qkvz);
   const int32_t grid_size = std::max(1, std::min(num_vectorcore, total_rows));
   const int32_t rows_per_vec = ceil_div(total_rows, grid_size);
 
