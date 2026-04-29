@@ -108,7 +108,8 @@ torch::Tensor npu_causal_conv1d_update_v2(
     int32_t pad_slot_id,
     const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
     const std::optional<torch::Tensor>& initial_state_idx,
-    bool validate_data) {
+    bool validate_data,
+    const std::optional<torch::Tensor>& num_accepted_tokens_opt) {
   TORCH_CHECK(weight.dim() == 2,
               "causal_conv1d_update_v2 expects weight shape [dim, width].");
   TORCH_CHECK(block_idx_last_scheduled_token.has_value() ==
@@ -154,8 +155,13 @@ torch::Tensor npu_causal_conv1d_update_v2(
   auto init_idx = initial_state_idx.has_value()
                       ? to_int32_contiguous(initial_state_idx.value())
                       : make_zero_i32(batch, x.device());
-  auto num_accepted_tokens = torch::ones(
-      {batch}, torch::TensorOptions().dtype(torch::kInt32).device(x.device()));
+  auto num_accepted_tokens =
+      num_accepted_tokens_opt.has_value()
+          ? to_int32_contiguous(num_accepted_tokens_opt.value())
+          : torch::ones({batch},
+                        torch::TensorOptions()
+                            .dtype(torch::kInt32)
+                            .device(x.device()));
 
   auto x_kernel = x_varlen.to(conv_state.dtype()).contiguous();
   auto weight_kernel = weight.transpose(0, 1).contiguous();
@@ -165,8 +171,9 @@ torch::Tensor npu_causal_conv1d_update_v2(
   rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
 
   const int32_t num_cache_lines = static_cast<int32_t>(conv_state.size(0));
-  const int32_t eff_state_len = kernel_width - 1;
-  const int32_t is_spec_decoding = 0;
+  const int32_t eff_state_len =
+      kernel_width - 1 + (num_accepted_tokens_opt.has_value() ? seqlen - 1 : 0);
+  const int32_t is_spec_decoding = num_accepted_tokens_opt.has_value() ? 1 : 0;
 
   const int64_t stride_x_token = x_kernel.stride(0);
   const int64_t stride_x_dim = x_kernel.stride(1);

@@ -123,7 +123,8 @@ torch::Tensor npu_causal_conv1d_update_v2(
     const std::optional<torch::Tensor>& block_idx_last_scheduled_token =
         std::nullopt,
     const std::optional<torch::Tensor>& initial_state_idx = std::nullopt,
-    bool validate_data = false);
+    bool validate_data = false,
+    const std::optional<torch::Tensor>& num_accepted_tokens = std::nullopt);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 npu_fused_qkvzba_split_reshape_cat(
