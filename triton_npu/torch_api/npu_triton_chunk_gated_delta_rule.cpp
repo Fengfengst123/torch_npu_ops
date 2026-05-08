@@ -146,6 +146,8 @@ void record_tensor_if_needed(const torch::Tensor& tensor,
                                              stream);
 }
 
+}  // namespace
+
 torch::Tensor npu_chunk_local_cumsum(
     const torch::Tensor& g2,
     int64_t chunk_size,
@@ -550,8 +552,6 @@ torch::Tensor npu_chunk_fwd_o(
   }
   return out;
 }
-
-}  // namespace
 
 std::pair<torch::Tensor, torch::Tensor> npu_chunk_gated_delta_rule(
     torch::Tensor& q,

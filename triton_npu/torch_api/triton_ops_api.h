@@ -28,9 +28,42 @@
 
 namespace xllm::kernel::npu {
 
-torch::Tensor npu_l2norm_last_dim(
-    torch::Tensor& x,
-    double eps = 1e-6);
+torch::Tensor npu_l2norm_last_dim(torch::Tensor& x, double eps = 1e-6);
+
+// Chunk gated delta rule pipeline operators
+torch::Tensor npu_chunk_local_cumsum(
+    const torch::Tensor& g,
+    int64_t chunk_size,
+    const std::optional<torch::Tensor>& cu_seqlens);
+
+torch::Tensor npu_chunk_scaled_dot_kkt_fwd(
+    const torch::Tensor& k,
+    const torch::Tensor& beta,
+    const torch::Tensor& g_cumsum,
+    int64_t chunk_size,
+    const std::optional<torch::Tensor>& cu_seqlens);
+
+torch::Tensor npu_solve_tril(const torch::Tensor& A,
+                             int64_t chunk_size,
+                             const std::optional<torch::Tensor>& cu_seqlens,
+                             torch::ScalarType output_dtype);
+
+std::pair<torch::Tensor, torch::Tensor> npu_recompute_w_u_fwd(
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& beta,
+    const torch::Tensor& g_cumsum,
+    const torch::Tensor& A,
+    const std::optional<torch::Tensor>& cu_seqlens);
+
+torch::Tensor npu_chunk_fwd_o(const torch::Tensor& q,
+                              const torch::Tensor& k,
+                              const torch::Tensor& v,
+                              const torch::Tensor& h,
+                              const torch::Tensor& g_cumsum,
+                              float scale,
+                              int64_t chunk_size,
+                              const std::optional<torch::Tensor>& cu_seqlens);
 
 void rope_inplace(torch::Tensor& x,
                   torch::Tensor& sin,
@@ -127,12 +160,11 @@ torch::Tensor npu_causal_conv1d_update_v2(
     const std::optional<torch::Tensor>& num_accepted_tokens = std::nullopt);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-npu_fused_qkvzba_split_reshape_cat(
-    torch::Tensor& mixed_qkvz,
-    torch::Tensor& mixed_ba,
-    int32_t num_heads_qk,
-    int32_t num_heads_v,
-    int32_t head_qk,
-    int32_t head_v);
+npu_fused_qkvzba_split_reshape_cat(torch::Tensor& mixed_qkvz,
+                                   torch::Tensor& mixed_ba,
+                                   int32_t num_heads_qk,
+                                   int32_t num_heads_v,
+                                   int32_t head_qk,
+                                   int32_t head_v);
 
 }  // namespace xllm::kernel::npu
