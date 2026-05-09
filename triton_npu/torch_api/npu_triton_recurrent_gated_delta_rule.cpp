@@ -39,6 +39,16 @@ int64_t cdiv(int64_t a, int64_t div) {
   return (a + div - 1) / div;
 }
 
+std::pair<int64_t, int64_t> get_state_index_strides(
+    const torch::Tensor& ssm_state_indices) {
+  if (ssm_state_indices.dim() == 1) {
+    return {ssm_state_indices.stride(0), 1};
+  }
+  TORCH_CHECK(ssm_state_indices.dim() == 2,
+              "ssm_state_indices must be 1D or 2D");
+  return {ssm_state_indices.stride(0), ssm_state_indices.stride(1)};
+}
+
 }  // namespace
 
 std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
@@ -54,6 +64,7 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
     const std::optional<torch::Tensor>& ssm_state_indices,
     const std::optional<torch::Tensor>& num_accepted_tokens,
     bool use_qk_l2norm_in_kernel) {
+  const bool is_spec_decoding = num_accepted_tokens.has_value();
   auto q_shape = q.sizes();
   auto k_shape = k.sizes();
   auto v_shape = v.sizes();
@@ -157,6 +168,44 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
   void* num_accepted_tokens_ptr = num_accepted_tokens.has_value()
                                       ? num_accepted_tokens.value().data_ptr()
                                       : nullptr;
+
+  if (is_spec_decoding) {
+    TORCH_CHECK(cu_seqlens.has_value(),
+                "cu_seqlens must be provided for spec decoding");
+    TORCH_CHECK(ssm_state_indices.has_value(),
+                "ssm_state_indices must be provided for spec decoding");
+    TORCH_CHECK(initial_state.has_value(),
+                "initial_state must be provided for spec decoding");
+    auto [stride_indices_seq, stride_indices_tok] =
+        get_state_index_strides(ssm_state_indices.value());
+
+    auto& op = OperationFactory::instance().recurrent_gated_delta_rule_spec_fwd();
+    auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+      ab.constructArgs(q_ptr,
+                       k_ptr,
+                       v_ptr,
+                       g_ptr,
+                       beta_ptr,
+                       o_ptr,
+                       initial_state_ptr,
+                       final_state_ptr,
+                       cu_seqlens_ptr,
+                       ssm_state_indices_ptr,
+                       num_accepted_tokens_ptr,
+                       scale_value,
+                       static_cast<int64_t>(N),
+                       static_cast<int64_t>(seq),
+                       stride_indices_seq,
+                       stride_indices_tok);
+    });
+    if (ret != RT_ERROR_NONE) {
+      LOG(ERROR) << "rtKernelLaunch failed for "
+                    "'fused_recurrent_gated_delta_rule_spec_fwd_kernel': "
+                 << ret;
+    }
+    o = o.squeeze(0);
+    return std::make_pair(o, final_state);
+  }
 
   auto& op = OperationFactory::instance().recurrent_gated_delta_rule_fwd();
   auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {

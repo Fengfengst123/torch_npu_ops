@@ -169,6 +169,124 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
+@triton.jit(do_not_specialize=["N", "T", "stride_indices_seq", "stride_indices_tok"])
+def fused_recurrent_gated_delta_rule_spec_fwd_kernel(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    o,
+    h0,
+    ht,
+    cu_seqlens,
+    ssm_state_indices,
+    num_accepted_tokens,
+    scale,
+    N: tl.int64,
+    T: tl.int64,
+    stride_indices_seq: tl.int64,
+    stride_indices_tok: tl.int64,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    stride_init_state_token: tl.constexpr,
+    stride_final_state_token: tl.constexpr,
+    IS_BETA_HEADWISE: tl.constexpr,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    IS_KDA: tl.constexpr,
+):
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    i_h = i_hv // (HV // H)
+    bos, eos = (
+        tl.load(cu_seqlens + i_n).to(tl.int64),
+        tl.load(cu_seqlens + i_n + 1).to(tl.int64),
+    )
+    all = T
+    T = eos - bos
+    if T == 0:
+        return
+
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+
+    p_q = q + (bos * H + i_h) * K + o_k
+    p_k = k + (bos * H + i_h) * K + o_k
+    p_v = v + (bos * HV + i_hv) * V + o_v
+    if IS_BETA_HEADWISE:
+        p_beta = beta + (bos * HV + i_hv) * V + o_v
+    else:
+        p_beta = beta + bos * HV + i_hv
+
+    if not IS_KDA:
+        p_g = g + bos * HV + i_hv
+    else:
+        p_gk = g + (bos * HV + i_hv) * K + o_k
+
+    p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
+
+    mask_k = o_k < K
+    mask_v = o_v < V
+    mask_h = mask_k[:, None] & mask_v[None, :]
+
+    accepted_token_idx = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+    initial_state_idx = tl.load(
+        ssm_state_indices + i_n * stride_indices_seq + accepted_token_idx * stride_indices_tok
+    ).to(tl.int64)
+    p_h0 = h0 + initial_state_idx * stride_init_state_token
+    p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+    b_h = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+
+    for i_t in range(0, T):
+        b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
+        b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
+        b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+
+        if USE_QK_L2NORM_IN_KERNEL:
+            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        b_q = b_q * scale
+
+        if not IS_KDA:
+            b_g = tl.load(p_g).to(tl.float32)
+            b_h *= tl.exp(b_g)
+        else:
+            b_gk = tl.load(p_gk).to(tl.float32)
+            b_h *= tl.exp(b_gk[:, None])
+
+        b_v -= tl.sum(b_h * b_k[:, None], 0)
+        if IS_BETA_HEADWISE:
+            b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
+        else:
+            b_beta = tl.load(p_beta).to(tl.float32)
+        b_v *= b_beta
+        b_h += b_k[:, None] * b_v[None, :]
+        b_o = tl.sum(b_h * b_q[:, None], 0)
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
+
+        final_state_idx = tl.load(
+            ssm_state_indices + i_n * stride_indices_seq + i_t * stride_indices_tok
+        ).to(tl.int64)
+        p_ht = ht + final_state_idx * stride_final_state_token
+        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+
+        p_q += H * K
+        p_k += H * K
+        p_o += HV * V
+        p_v += HV * V
+        if not IS_KDA:
+            p_g += HV
+        else:
+            p_gk += HV * K
+        p_beta += HV * (V if IS_BETA_HEADWISE else 1)
+
+
 def fused_recurrent_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -240,6 +358,67 @@ def fused_recurrent_gated_delta_rule_fwd(
     )
     o = o.squeeze(0)
     return o, final_state
+
+
+def fused_recurrent_gated_delta_rule_spec_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.LongTensor,
+    ssm_state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    HV = v.shape[2]
+    N = len(cu_seqlens) - 1
+    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 64)
+    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
+    assert NK == 1, "NK > 1 is not supported yet"
+
+    o = q.new_empty(NK, *v.shape)
+    final_state = initial_state
+    if ssm_state_indices.ndim == 1:
+        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
+    else:
+        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+
+    grid = (NK, NV, N * HV)
+    fused_recurrent_gated_delta_rule_spec_fwd_kernel[grid](
+        q=q.contiguous(),
+        k=k.contiguous(),
+        v=v.contiguous(),
+        g=g.contiguous(),
+        beta=beta.contiguous(),
+        o=o,
+        h0=initial_state,
+        ht=final_state,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        scale=scale,
+        N=N,
+        T=T,
+        stride_indices_seq=stride_indices_seq,
+        stride_indices_tok=stride_indices_tok,
+        B=B,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        BK=BK,
+        BV=BV,
+        stride_init_state_token=initial_state.stride(0),
+        stride_final_state_token=final_state.stride(0),
+        IS_BETA_HEADWISE=beta.ndim == v.ndim,
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        IS_KDA=False,
+    )
+    return o.squeeze(0), final_state
 
 
 class FusedRecurrentFunction(torch.autograd.Function):
@@ -529,4 +708,213 @@ def test_accuracy_fused_recurrent(
         rtol=0.05,   
         atol=0.01,
         msg="Final state mismatch"
+    )
+
+
+def test_accuracy_fused_recurrent_spec_qwen35_shape():
+    device = "npu"
+    torch.manual_seed(43)
+    num_sequences, seq_len, H, HV, D = 2, 3, 8, 16, 128
+    scale = 0.5
+    dtype = torch.bfloat16
+
+    q = torch.randn(num_sequences, seq_len, H, D, dtype=dtype)
+    k = torch.randn(num_sequences, seq_len, H, D, dtype=dtype)
+    v = torch.randn(num_sequences, seq_len, HV, D, dtype=dtype)
+    beta = torch.rand(num_sequences, seq_len, HV, dtype=dtype).sigmoid()
+    g = F.logsigmoid(torch.rand(num_sequences, seq_len, HV, dtype=torch.float32))
+    state_slots = num_sequences * seq_len
+    initial_state = torch.randn(state_slots, HV, D, D, dtype=torch.float32)
+    state_indices = torch.arange(
+        state_slots, dtype=torch.int32, device=device).reshape(num_sequences, seq_len)
+    num_accepted_tokens = torch.ones(num_sequences, dtype=torch.int32, device=device)
+
+    q, k, v, beta, g, initial_state = map(
+        lambda x: x.to(device), (q, k, v, beta, g, initial_state)
+    )
+    cu_seqlens = torch.arange(num_sequences + 1, dtype=torch.long, device=device) * seq_len
+
+    q_d = q.reshape(1, num_sequences * seq_len, H, D)
+    k_d = k.reshape(1, num_sequences * seq_len, H, D)
+    v_d = v.reshape(1, num_sequences * seq_len, HV, D)
+    g_d = g.reshape(1, num_sequences * seq_len, HV)
+    beta_d = beta.reshape(1, num_sequences * seq_len, HV)
+
+    ref_chunks = []
+    ref_ht_chunks = []
+    for i in range(num_sequences):
+        start, end = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
+        q_i = q_d[:, start:end]
+        k_i = k_d[:, start:end]
+        v_i = v_d[:, start:end]
+        g_i = g_d[:, start:end]
+        beta_i = beta_d[:, start:end]
+        h0_i = initial_state[state_indices[i, 0]].unsqueeze(0)
+        q_i_norm = F.normalize(
+            repeat(q_i, "b t h d -> b t (h g) d", g=HV // H),
+            p=2,
+            dim=-1,
+            eps=1e-6,
+        ).to(dtype)
+        k_i_norm = F.normalize(
+            repeat(k_i, "b t h d -> b t (h g) d", g=HV // H),
+            p=2,
+            dim=-1,
+            eps=1e-6,
+        ).to(dtype)
+        ref_i, ref_ht_i = recurrent_gated_delta_rule_ref(
+            q=q_i_norm,
+            k=k_i_norm,
+            v=v_i,
+            beta=beta_i,
+            g=g_i,
+            scale=scale,
+            initial_state=h0_i,
+            output_final_state=True,
+        )
+        ref_chunks.append(ref_i)
+        ref_ht_chunks.append(ref_ht_i)
+
+    ref = torch.cat(ref_chunks, dim=1).reshape(num_sequences, seq_len, HV, D)
+    ref_ht = torch.cat(ref_ht_chunks, dim=0)
+    tri, tri_ht = fused_recurrent_gated_delta_rule_spec_fwd(
+        q=q_d,
+        k=k_d,
+        v=v_d,
+        beta=beta_d,
+        g=g_d,
+        scale=scale,
+        initial_state=initial_state.clone(),
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        use_qk_l2norm_in_kernel=True,
+    )
+    tri = tri.reshape(num_sequences, seq_len, HV, D)
+    tri_ht_last = tri_ht[state_indices[:, -1].to(torch.long)]
+
+    torch.testing.assert_close(
+        ref.to(torch.float32),
+        tri.to(torch.float32),
+        rtol=0.005,
+        atol=0.01,
+        msg="Spec output mismatch",
+    )
+    torch.testing.assert_close(
+        ref_ht.to(torch.float32),
+        tri_ht_last.to(torch.float32),
+        rtol=0.05,
+        atol=0.01,
+        msg="Spec final state mismatch",
+    )
+
+
+def test_accuracy_fused_recurrent_spec_accepted_offsets():
+    device = "npu"
+    torch.manual_seed(44)
+    num_sequences, seq_len, H, HV, D = 3, 4, 8, 16, 128
+    scale = 0.5
+    dtype = torch.bfloat16
+
+    q = torch.randn(num_sequences, seq_len, H, D, dtype=dtype)
+    k = torch.randn(num_sequences, seq_len, H, D, dtype=dtype)
+    v = torch.randn(num_sequences, seq_len, HV, D, dtype=dtype)
+    beta = torch.rand(num_sequences, seq_len, HV, dtype=dtype).sigmoid()
+    g = F.logsigmoid(torch.rand(num_sequences, seq_len, HV, dtype=torch.float32))
+    state_slots = 32
+    initial_state = torch.randn(state_slots, HV, D, D, dtype=torch.float32)
+
+    state_indices_cpu = torch.tensor(
+        [[2, 4, 6, 8], [11, 13, 15, 17], [20, 22, 24, 26]],
+        dtype=torch.int32,
+    )
+    num_accepted_tokens_cpu = torch.tensor([1, 2, 3], dtype=torch.int32)
+
+    q, k, v, beta, g, initial_state = map(
+        lambda x: x.to(device), (q, k, v, beta, g, initial_state)
+    )
+    state_indices = state_indices_cpu.to(device)
+    num_accepted_tokens = num_accepted_tokens_cpu.to(device)
+    cu_seqlens = torch.arange(num_sequences + 1, dtype=torch.long, device=device) * seq_len
+
+    q_d = q.reshape(1, num_sequences * seq_len, H, D)
+    k_d = k.reshape(1, num_sequences * seq_len, H, D)
+    v_d = v.reshape(1, num_sequences * seq_len, HV, D)
+    g_d = g.reshape(1, num_sequences * seq_len, HV)
+    beta_d = beta.reshape(1, num_sequences * seq_len, HV)
+
+    ref_chunks = []
+    ref_state_chunks = []
+    for seq_idx in range(num_sequences):
+        q_i = q_d[:, seq_idx * seq_len : (seq_idx + 1) * seq_len]
+        k_i = k_d[:, seq_idx * seq_len : (seq_idx + 1) * seq_len]
+        v_i = v_d[:, seq_idx * seq_len : (seq_idx + 1) * seq_len]
+        g_i = g_d[:, seq_idx * seq_len : (seq_idx + 1) * seq_len]
+        beta_i = beta_d[:, seq_idx * seq_len : (seq_idx + 1) * seq_len]
+        accepted_idx = int(num_accepted_tokens_cpu[seq_idx].item()) - 1
+        h = initial_state[
+            int(state_indices_cpu[seq_idx, accepted_idx].item())
+        ].unsqueeze(0)
+        q_i = F.normalize(
+            repeat(q_i, "b t h d -> b t (h g) d", g=HV // H),
+            p=2,
+            dim=-1,
+            eps=1e-6,
+        ).to(dtype)
+        k_i = F.normalize(
+            repeat(k_i, "b t h d -> b t (h g) d", g=HV // H),
+            p=2,
+            dim=-1,
+            eps=1e-6,
+        ).to(dtype)
+        outputs = []
+        states = []
+        for token_idx in range(seq_len):
+            ref_i, h = recurrent_gated_delta_rule_ref(
+                q=q_i[:, token_idx : token_idx + 1],
+                k=k_i[:, token_idx : token_idx + 1],
+                v=v_i[:, token_idx : token_idx + 1],
+                beta=beta_i[:, token_idx : token_idx + 1],
+                g=g_i[:, token_idx : token_idx + 1],
+                scale=scale,
+                initial_state=h,
+                output_final_state=True,
+            )
+            outputs.append(ref_i)
+            states.append(h.squeeze(0))
+        ref_chunks.append(torch.cat(outputs, dim=1))
+        ref_state_chunks.append(torch.stack(states, dim=0))
+
+    ref = torch.cat(ref_chunks, dim=1).reshape(num_sequences, seq_len, HV, D)
+    ref_states = torch.cat(ref_state_chunks, dim=0)
+
+    tri, tri_ht = fused_recurrent_gated_delta_rule_spec_fwd(
+        q=q_d,
+        k=k_d,
+        v=v_d,
+        beta=beta_d,
+        g=g_d,
+        scale=scale,
+        initial_state=initial_state.clone(),
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        use_qk_l2norm_in_kernel=True,
+    )
+    tri = tri.reshape(num_sequences, seq_len, HV, D)
+    tri_states = tri_ht[state_indices.reshape(-1).to(torch.long)]
+
+    torch.testing.assert_close(
+        ref.to(torch.float32),
+        tri.to(torch.float32),
+        rtol=0.005,
+        atol=0.01,
+        msg="Spec output mismatch with accepted offsets",
+    )
+    torch.testing.assert_close(
+        ref_states.to(torch.float32),
+        tri_states.to(torch.float32),
+        rtol=0.05,
+        atol=0.01,
+        msg="Spec per-token state mismatch with accepted offsets",
     )

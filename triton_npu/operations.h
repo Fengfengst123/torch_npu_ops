@@ -116,6 +116,18 @@ class RecurrentGatedDeltaRuleFwdOp final : public OperationBase {
       : OperationBase("fused_recurrent_gated_delta_rule_fwd_kernel") {}
 };
 
+class RecurrentGatedDeltaRuleSpecFwdOp final : public OperationBase {
+ public:
+  RecurrentGatedDeltaRuleSpecFwdOp()
+      : OperationBase("fused_recurrent_gated_delta_rule_spec_fwd_kernel") {}
+};
+
+class FusedSigmoidGatingDeltaRuleUpdateOp final : public OperationBase {
+ public:
+  FusedSigmoidGatingDeltaRuleUpdateOp()
+      : OperationBase("fused_sigmoid_gating_delta_rule_update_kernel") {}
+};
+
 class ChunkGatedDeltaRuleFwdHOp final : public OperationBase {
  public:
   ChunkGatedDeltaRuleFwdHOp()

@@ -109,6 +109,16 @@ class OperationFactory final {
         "fused_recurrent_gated_delta_rule_fwd_kernel");
   }
 
+  RecurrentGatedDeltaRuleSpecFwdOp& recurrent_gated_delta_rule_spec_fwd() {
+    return get_or_create<RecurrentGatedDeltaRuleSpecFwdOp>(
+        "fused_recurrent_gated_delta_rule_spec_fwd_kernel");
+  }
+
+  FusedSigmoidGatingDeltaRuleUpdateOp& fused_sigmoid_gating_delta_rule_update() {
+    return get_or_create<FusedSigmoidGatingDeltaRuleUpdateOp>(
+        "fused_sigmoid_gating_delta_rule_update_kernel");
+  }
+
   ChunkGatedDeltaRuleFwdHOp& chunk_gated_delta_rule_fwd_h() {
     return get_or_create<ChunkGatedDeltaRuleFwdHOp>(
         "chunk_gated_delta_rule_fwd_kernel_h_blockdim64");

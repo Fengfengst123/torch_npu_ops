@@ -136,6 +136,9 @@ class OperationBase {
                     int32_t gridY,
                     int32_t gridZ,
                     BuildArgsFn&& build_args) {
+    aclmdlRICaptureStatus capture_status = ACL_MODEL_RI_CAPTURE_STATUS_NONE;
+    aclmdlRI model_ri = nullptr;
+    (void)aclmdlRICaptureGetInfo(stream, &capture_status, &model_ri);
     if (!ensure_registered()) {
       return static_cast<rtError_t>(-1);
     }
@@ -183,6 +186,12 @@ class OperationBase {
                             static_cast<uint32_t>(ab.size()),
                             nullptr,
                             stream);
+
+    if (capture_status != ACL_MODEL_RI_CAPTURE_STATUS_NONE) {
+      cleanup_workspace(workspace, lock);
+      cleanup_completed_releases();
+      return rt_ret;
+    }
 
     // In graph capture mode, aclrtRecordEvent is not supported (207000).
     // We skip async release and free workspace immediately, because graph

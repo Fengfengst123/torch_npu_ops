@@ -27,6 +27,7 @@ set(TRITON_NPU_API_SRCS
   triton_npu/torch_api/npu_triton_causal_conv1d_update.cpp
   triton_npu/torch_api/npu_triton_causal_conv1d_update_v2.cpp
   triton_npu/torch_api/npu_triton_recurrent_gated_delta_rule.cpp
+  triton_npu/torch_api/npu_triton_fused_sigmoid_gating_delta_rule_update.cpp
   triton_npu/torch_api/npu_triton_chunk_gated_delta_rule.cpp
   triton_npu/torch_api/npu_triton_fused_qkvzba_split_reshape.cpp
 )

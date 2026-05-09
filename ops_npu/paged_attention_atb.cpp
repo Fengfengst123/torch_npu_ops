@@ -3,7 +3,11 @@
 
 #include "custom_functions_npu/atb_common.h"
 
+#include <glog/logging.h>
+
 namespace atb {
+
+namespace {
 
 // Helper function to create PagedAttentionParam with common settings
 static atb::infer::PagedAttentionParam createPagedAttentionParam(
@@ -27,6 +31,65 @@ static atb::infer::PagedAttentionParam createPagedAttentionParam(
   pagedparam.mlaVHeadSize = 0;
   return pagedparam;
 }
+
+uint64_t getChunkedPagedAttentionHash(
+    const atb::infer::PagedAttentionParam& pagedparam,
+    const at::Tensor& query,
+    const at::Tensor& block_table,
+    const at::Tensor& context_lens,
+    const at::Tensor& mask,
+    const at::Tensor& q_lens,
+    const at::Tensor& out) {
+  g_hash_offset = 0;
+  HashOpParam<atb::infer::PagedAttentionParam>{}(pagedparam);
+  add_param_to_buf("chunked_paged_attention");
+  auto add_tensor_shape = [](const char* name, const at::Tensor& tensor) {
+    add_param_to_buf(name);
+    const int64_t dim = tensor.dim();
+    add_param_to_buf(dim);
+    for (int64_t i = 0; i < dim; ++i) {
+      const int64_t size = tensor.size(i);
+      add_param_to_buf(size);
+    }
+    const int64_t dtype = static_cast<int64_t>(tensor.scalar_type());
+    add_param_to_buf(dtype);
+  };
+  add_tensor_shape("query", query);
+  add_tensor_shape("block_table", block_table);
+  add_tensor_shape("context_lens", context_lens);
+  add_tensor_shape("mask", mask);
+  add_tensor_shape("q_lens", q_lens);
+  add_tensor_shape("out", out);
+  return calc_hash_id();
+}
+
+atb::Operation* getChunkedPagedAttentionOperation(
+    const atb::infer::PagedAttentionParam& pagedparam,
+    const at::Tensor& query,
+    const at::Tensor& block_table,
+    const at::Tensor& context_lens,
+    const at::Tensor& mask,
+    const at::Tensor& q_lens,
+    const at::Tensor& out) {
+  const auto is_capturing =
+      static_cast<int>(c10_npu::currentStreamCaptureStatusMayInitCtx());
+  if (is_capturing) {
+    return create_atb_operation(pagedparam, "PagedAttentionOperation");
+  }
+
+  OpParamCache<atb::infer::PagedAttentionParam>& pagedAttentionParamCache =
+      OpParamCache<atb::infer::PagedAttentionParam>::getInstance();
+  const uint64_t hash_id = getChunkedPagedAttentionHash(
+      pagedparam, query, block_table, context_lens, mask, q_lens, out);
+  atb::Operation* op = pagedAttentionParamCache.get_operation(hash_id);
+  if (op == nullptr) {
+    op = create_atb_operation(pagedparam, "PagedAttentionOperation");
+    pagedAttentionParamCache.save_operation(hash_id, op);
+  }
+  return op;
+}
+
+}  // namespace
 
 void npu_paged_attention(const at::Tensor& query,
                          const at::Tensor& key_cache,
@@ -57,20 +120,18 @@ void npu_paged_attention(const at::Tensor& query,
   return;
 }
 
-void npu_spec_paged_attention(const at::Tensor& query,
-                              const at::Tensor& key_cache,
-                              const at::Tensor& value_cache,
-                              int64_t num_kv_heads,
-                              int64_t num_heads,
-                              double scale_value,
-                              const at::Tensor& block_table,
-                              const at::Tensor& context_lens,
-                              const at::Tensor& mask,
-                              const at::Tensor& q_lens,
-                              at::Tensor& out) {
+void npu_chunked_paged_attention(const at::Tensor& query,
+                                 const at::Tensor& key_cache,
+                                 const at::Tensor& value_cache,
+                                 int64_t num_kv_heads,
+                                 int64_t num_heads,
+                                 double scale_value,
+                                 const at::Tensor& block_table,
+                                 const at::Tensor& context_lens,
+                                 const at::Tensor& mask,
+                                 const at::Tensor& q_lens,
+                                 at::Tensor& out) {
   const c10::OptionalDeviceGuard device_guard(device_of(query));
-  OpParamCache<atb::infer::PagedAttentionParam>& pagedAttentionParamCache =
-      OpParamCache<atb::infer::PagedAttentionParam>::getInstance();
   atb::infer::PagedAttentionParam pagedparam =
       createPagedAttentionParam(num_heads, num_kv_heads, scale_value);
   pagedparam.maskType = atb::infer::PagedAttentionParam::MASK_TYPE_SPEC;
@@ -85,11 +146,9 @@ void npu_spec_paged_attention(const at::Tensor& query,
       .Input(mask)
       .Input(q_lens, true)
       .Output(out);
-  auto opPaged = pagedAttentionParamCache.get_operation(
-      pagedparam, "PagedAttentionOperation");
+  auto opPaged = getChunkedPagedAttentionOperation(
+      pagedparam, query, block_table, context_lens, mask, q_lens, out);
   run_atb_cmd(opPaged, paramsetter, "PagedAttentionOperation");
-
-  return;
 }
 
 void npu_custom_paged_attention(const at::Tensor& query,

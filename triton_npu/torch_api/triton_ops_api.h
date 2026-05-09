@@ -92,6 +92,22 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
     const std::optional<torch::Tensor>& num_accepted_tokens = std::nullopt,
     bool use_qk_l2norm_in_kernel = false);
 
+torch::Tensor npu_fused_sigmoid_gating_delta_rule_update(
+    torch::Tensor& A_log,
+    torch::Tensor& a,
+    torch::Tensor& dt_bias,
+    torch::Tensor& q,
+    torch::Tensor& k,
+    torch::Tensor& v,
+    torch::Tensor& b,
+    torch::Tensor& initial_state_source,
+    torch::Tensor& initial_state_indices,
+    torch::Tensor& cu_seqlens,
+    const std::optional<float>& scale = std::nullopt,
+    bool use_qk_l2norm_in_kernel = false,
+    float softplus_beta = 1.0f,
+    float softplus_threshold = 20.0f);
+
 std::pair<torch::Tensor, torch::Tensor> npu_chunk_gated_delta_rule(
     torch::Tensor& q,
     torch::Tensor& k,
