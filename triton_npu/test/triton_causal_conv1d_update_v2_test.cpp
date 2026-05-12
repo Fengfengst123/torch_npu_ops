@@ -123,8 +123,9 @@ torch::Tensor causal_conv1d_update_ref_v2(
                       : zero_i32;
 
   const auto stride_x_token = x_float.stride(0);
-  const auto stride_state_seq = conv_state.stride(0);
-  const auto stride_state_token = conv_state.stride(1);
+  const auto stride_state_seq = state_float.stride(0);
+  const auto stride_state_dim = state_float.stride(1);
+  const auto stride_state_token = state_float.stride(2);
   const int64_t num_cache_lines = conv_state.size(0);
 
   auto* x_ptr = x_float.data_ptr<float>();
@@ -159,8 +160,9 @@ torch::Tensor causal_conv1d_update_ref_v2(
       std::vector<float> cols(std::max<int64_t>(width - 1, 0), 0.0f);
       if (input_valid) {
         for (int64_t k = 0; k < width - 1; ++k) {
-          const int64_t offset =
-              in_idx * stride_state_seq + feat + k * stride_state_token;
+          const int64_t offset = in_idx * stride_state_seq +
+                                 feat * stride_state_dim +
+                                 k * stride_state_token;
           cols[k] = state_ptr[offset];
         }
       }
@@ -188,10 +190,12 @@ torch::Tensor causal_conv1d_update_ref_v2(
       if (seq_len < state_len_run) {
         if (input_valid) {
           for (int64_t dst_tok = 0; dst_tok < keep_shift; ++dst_tok) {
-            const int64_t src_offset = in_idx * stride_state_seq + feat +
-                                       (dst_tok + seq_len) * stride_state_token;
+            const int64_t src_offset =
+                in_idx * stride_state_seq + feat * stride_state_dim +
+                (dst_tok + seq_len) * stride_state_token;
             const int64_t dst_offset =
-                out_idx * stride_state_seq + feat + dst_tok * stride_state_token;
+                out_idx * stride_state_seq + feat * stride_state_dim +
+                dst_tok * stride_state_token;
             state_ptr[dst_offset] = state_ptr[src_offset];
           }
         }
@@ -202,7 +206,8 @@ torch::Tensor causal_conv1d_update_ref_v2(
           }
           const int64_t x_offset = (start + x_tok) * stride_x_token + feat;
           const int64_t dst_offset =
-              out_idx * stride_state_seq + feat + dst_tok * stride_state_token;
+              out_idx * stride_state_seq + feat * stride_state_dim +
+              dst_tok * stride_state_token;
           state_ptr[dst_offset] = x_ptr[x_offset];
         }
       } else {
@@ -210,7 +215,8 @@ torch::Tensor causal_conv1d_update_ref_v2(
           const int64_t x_offset =
               (start + tail_start + dst_tok) * stride_x_token + feat;
           const int64_t dst_offset =
-              out_idx * stride_state_seq + feat + dst_tok * stride_state_token;
+              out_idx * stride_state_seq + feat * stride_state_dim +
+              dst_tok * stride_state_token;
           state_ptr[dst_offset] = x_ptr[x_offset];
         }
       }

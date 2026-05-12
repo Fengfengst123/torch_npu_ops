@@ -123,6 +123,7 @@ torch::Tensor npu_causal_conv1d_update_v2(
               "causal_conv1d_update_v2 expects conv_state shape "
               "[num_cache_lines, dim, state_len].");
   const auto original_x_dtype = x.dtype();
+  auto conv_state_kernel = conv_state.transpose(1, 2).contiguous();
 
   auto [x_varlen, qsl, batch, seqlen, unsqueeze] =
       prepare_v2_input(x, query_start_loc, max_query_len);
@@ -138,6 +139,11 @@ torch::Tensor npu_causal_conv1d_update_v2(
               dim,
               ", got ",
               weight.size(0));
+  TORCH_CHECK(conv_state.size(1) == dim,
+              "conv_state dim mismatch. Expected ",
+              dim,
+              ", got ",
+              conv_state.size(1));
 
   auto bias_tensor = bias.has_value() ? bias.value().contiguous()
                                       : make_default_bias(weight);
@@ -163,14 +169,14 @@ torch::Tensor npu_causal_conv1d_update_v2(
                             .dtype(torch::kInt32)
                             .device(x.device()));
 
-  auto x_kernel = x_varlen.to(conv_state.dtype()).contiguous();
+  auto x_kernel = x_varlen.to(conv_state_kernel.dtype()).contiguous();
   auto weight_kernel = weight.transpose(0, 1).contiguous();
   auto out_kernel = torch::empty_like(x_kernel);
 
   auto npu_stream = c10_npu::getCurrentNPUStream();
   rtStream_t stream = static_cast<rtStream_t>(npu_stream.stream());
 
-  const int32_t num_cache_lines = static_cast<int32_t>(conv_state.size(0));
+  const int32_t num_cache_lines = static_cast<int32_t>(conv_state_kernel.size(0));
   const int32_t eff_state_len =
       kernel_width - 1 + (num_accepted_tokens_opt.has_value() ? seqlen - 1 : 0);
   const int32_t is_spec_decoding = num_accepted_tokens_opt.has_value() ? 1 : 0;
@@ -179,9 +185,9 @@ torch::Tensor npu_causal_conv1d_update_v2(
   const int64_t stride_x_dim = x_kernel.stride(1);
   const int64_t stride_w_width = weight_kernel.stride(0);
   const int64_t stride_w_dim = weight_kernel.stride(1);
-  const int64_t stride_state_seq = conv_state.stride(0);
-  const int64_t stride_state_token = conv_state.stride(1);
-  const int64_t stride_state_dim = conv_state.stride(2);
+  const int64_t stride_state_seq = conv_state_kernel.stride(0);
+  const int64_t stride_state_token = conv_state_kernel.stride(1);
+  const int64_t stride_state_dim = conv_state_kernel.stride(2);
   const int64_t stride_state_indices = slot_table.stride(0);
   const int64_t stride_o_token = out_kernel.stride(0);
   const int64_t stride_o_dim = out_kernel.stride(1);
@@ -195,7 +201,7 @@ torch::Tensor npu_causal_conv1d_update_v2(
                           ab.constructArgs(x_kernel.data_ptr(),
                                            weight_kernel.data_ptr(),
                                            bias_tensor.data_ptr(),
-                                           conv_state.data_ptr(),
+                                           conv_state_kernel.data_ptr(),
                                            slot_table.data_ptr(),
                                            num_accepted_tokens.data_ptr(),
                                            qsl.data_ptr(),
@@ -224,6 +230,10 @@ torch::Tensor npu_causal_conv1d_update_v2(
     return torch::zeros_like(x);
   }
 
+  auto updated_conv_state = conv_state_kernel.transpose(1, 2);
+  if (updated_conv_state.data_ptr() != conv_state.data_ptr()) {
+    conv_state.copy_(updated_conv_state.to(conv_state.dtype()));
+  }
   auto out = activation ? torch::silu(out_kernel) : out_kernel;
   return out.to(original_x_dtype);
 }
