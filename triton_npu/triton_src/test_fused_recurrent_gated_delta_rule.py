@@ -18,7 +18,16 @@ from einops import repeat
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["N", "T"])
+@triton.jit(
+    do_not_specialize=[
+        "N",
+        "T",
+        "H",
+        "HV",
+        "stride_init_state_token",
+        "stride_final_state_token",
+    ]
+)
 def fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
@@ -35,14 +44,14 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
     B: tl.constexpr,
-    H: tl.constexpr,
-    HV: tl.constexpr,
+    H: tl.int64,
+    HV: tl.int64,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_init_state_token: tl.constexpr,
-    stride_final_state_token: tl.constexpr,
+    stride_init_state_token: tl.int64,
+    stride_final_state_token: tl.int64,
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
@@ -169,7 +178,18 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-@triton.jit(do_not_specialize=["N", "T", "stride_indices_seq", "stride_indices_tok"])
+@triton.jit(
+    do_not_specialize=[
+        "N",
+        "T",
+        "stride_indices_seq",
+        "stride_indices_tok",
+        "H",
+        "HV",
+        "stride_init_state_token",
+        "stride_final_state_token",
+    ]
+)
 def fused_recurrent_gated_delta_rule_spec_fwd_kernel(
     q,
     k,
@@ -188,14 +208,14 @@ def fused_recurrent_gated_delta_rule_spec_fwd_kernel(
     stride_indices_seq: tl.int64,
     stride_indices_tok: tl.int64,
     B: tl.constexpr,
-    H: tl.constexpr,
-    HV: tl.constexpr,
+    H: tl.int64,
+    HV: tl.int64,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_init_state_token: tl.constexpr,
-    stride_final_state_token: tl.constexpr,
+    stride_init_state_token: tl.int64,
+    stride_final_state_token: tl.int64,
     IS_BETA_HEADWISE: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_KDA: tl.constexpr,
@@ -610,6 +630,24 @@ def recurrent_gated_delta_rule_ref(
             (8, 1, 4, 8, 128, 0.3, 1, torch.bfloat16),
             (16, 1, 4, 8, 128, 0.2, 1, torch.bfloat16),
             (32, 1, 4, 8, 128, 0.2, 1, torch.bfloat16),
+            # Qwen3.5/Qwen3.6 local GDN shapes for TP1/2/4/8.
+            (2, 1, 16, 16, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 8, 8, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 4, 4, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 2, 2, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 16, 32, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 8, 16, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 2, 4, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 16, 48, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 8, 24, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 4, 12, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 2, 6, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 16, 64, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 8, 32, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 4, 16, 128, 0.2, 1, torch.bfloat16),
+            (2, 1, 2, 8, 128, 0.2, 1, torch.bfloat16),
+            # Regression for the previously observed TP4 spec-local shape.
+            (2, 1, 1, 8, 128, 0.2, 1, torch.bfloat16),
         ]
     ],
 )
@@ -711,11 +749,33 @@ def test_accuracy_fused_recurrent(
     )
 
 
-def test_accuracy_fused_recurrent_spec_qwen35_shape():
+@pytest.mark.parametrize(
+    "H, HV",
+    [
+        (16, 16),
+        (8, 8),
+        (4, 4),
+        (2, 2),
+        (16, 32),
+        (8, 16),
+        (4, 8),
+        (2, 4),
+        (16, 48),
+        (8, 24),
+        (4, 12),
+        (2, 6),
+        (16, 64),
+        (8, 32),
+        (4, 16),
+        (2, 8),
+        (1, 8),
+    ],
+)
+def test_accuracy_fused_recurrent_spec_qwen35_shape(H: int, HV: int):
     device = "npu"
     torch.manual_seed(43)
-    num_sequences, seq_len, H, HV, D = 2, 3, 8, 16, 128
-    scale = 0.5
+    num_sequences, seq_len, D = 2, 3, 128
+    scale = D ** -0.5
     dtype = torch.bfloat16
 
     q = torch.randn(num_sequences, seq_len, H, D, dtype=dtype)

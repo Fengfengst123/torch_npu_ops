@@ -90,6 +90,10 @@ inline std::vector<std::filesystem::path> get_candidate_binary_roots() {
 
   append_env_binary_root(&roots, "TRITON_BINARY_PATH");
 
+#ifdef TRITON_BINARY_PATH
+  append_unique_path(&roots, std::filesystem::path(TRITON_BINARY_PATH));
+#endif
+
   std::filesystem::path current_object_dir = get_current_object_dir();
   if (!current_object_dir.empty()) {
     append_unique_path(&roots, current_object_dir / "triton_npu" / "binary");
@@ -99,10 +103,6 @@ inline std::vector<std::filesystem::path> get_candidate_binary_roots() {
   if (!executable_dir.empty()) {
     append_unique_path(&roots, executable_dir / "triton_npu" / "binary");
   }
-
-#ifdef TRITON_BINARY_PATH
-  append_unique_path(&roots, std::filesystem::path(TRITON_BINARY_PATH));
-#endif
 
   return roots;
 }

@@ -249,6 +249,26 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(1, 16, 64, 128, 128),
         std::make_tuple(4, 16, 32, 128, 128),
         std::make_tuple(8, 16, 32, 128, 128),
+        // Qwen3.5 0.8B / 2B local heads: 16->16 split by TP1/2/4/8.
+        std::make_tuple(64, 16, 16, 128, 128),
+        std::make_tuple(64,  8,  8, 128, 128),
+        std::make_tuple(64,  4,  4, 128, 128),
+        std::make_tuple(64,  2,  2, 128, 128),
+        // Qwen3.5 9B / Qwen3.6 35B-A3B local heads: 16->32 split by TP1/2/4/8.
+        std::make_tuple(64, 16, 32, 128, 128),
+        std::make_tuple(64,  8, 16, 128, 128),
+        std::make_tuple(64,  4,  8, 128, 128),
+        std::make_tuple(64,  2,  4, 128, 128),
+        // Qwen3.5 27B / Qwen3.6 27B local heads: 16->48 split by TP1/2/4/8.
+        std::make_tuple(64, 16, 48, 128, 128),
+        std::make_tuple(64,  8, 24, 128, 128),
+        std::make_tuple(64,  4, 12, 128, 128),
+        std::make_tuple(64,  2,  6, 128, 128),
+        // Qwen3.5 397B-A17B / 122B-A10B local heads: 16->64 split by TP1/2/4/8.
+        std::make_tuple(64, 16, 64, 128, 128),
+        std::make_tuple(64,  8, 32, 128, 128),
+        std::make_tuple(64,  4, 16, 128, 128),
+        std::make_tuple(64,  2,  8, 128, 128),
         // Larger batches to exercise >65535-token code path
         std::make_tuple(4096,  2,  4, 128, 128),
         std::make_tuple(4096, 16, 16, 128, 128),

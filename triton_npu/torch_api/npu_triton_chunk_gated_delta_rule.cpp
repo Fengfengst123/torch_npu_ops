@@ -170,9 +170,9 @@ torch::Tensor npu_chunk_local_cumsum(
   //               "chunk_local_cumsum only supports B=1 when cu_seqlens is "
   //               "provided.");
   // }
-  TORCH_CHECK(H <= 32,
+  TORCH_CHECK(H <= 64,
               "chunk_local_cumsum runtime-variable adapter currently supports "
-              "H <= 32, got ",
+              "H <= 64, got ",
               H);
 
   const int64_t block_t = 512;

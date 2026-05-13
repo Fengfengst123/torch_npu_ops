@@ -31,8 +31,8 @@ namespace xllm::kernel::npu {
 
 constexpr float kTolerance = 1e-3f;
 constexpr int32_t kDeviceId = 0;
-constexpr std::array<int64_t, 10> kNumHeadsTestCases =
-    {1, 2, 3, 4, 6, 8, 12, 16, 24, 32};
+constexpr std::array<int64_t, 12> kNumHeadsTestCases =
+    {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64};
 
 std::pair<torch::Tensor, torch::Tensor> torch_fused_gdn_gating(
     const torch::Tensor& A_log,

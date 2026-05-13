@@ -88,7 +88,7 @@ def chunk_local_cumsum_scalar(
     assert chunk_size == 2**(chunk_size.bit_length() -
                              1), "chunk_size must be a power of 2"
     OPTIM_BLOCK_SIZE = 512
-    BLOCK_H = 32
+    BLOCK_H = 64
     assert H <= BLOCK_H, f"H={H} exceeds runtime cumsum BLOCK_H={BLOCK_H}"
     block_indices = prepare_chunk_indices(
         cu_seqlens,

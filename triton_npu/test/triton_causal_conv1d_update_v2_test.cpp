@@ -337,6 +337,24 @@ void RunVarlenApcDecodeCase(const torch::TensorOptions& tensor_options,
                                kToleranceV2));
 }
 
+std::vector<int64_t> QwenGdnMixedQkvDims() {
+  return {
+      768,    // 16->16, TP8 ratio 1
+      1024,   // 16->32 or 16->48, TP8 ratio 2
+      1280,   // 16->48, TP8 ratio 3
+      1536,   // 16->64, TP8 ratio 4
+      2048,   // 16->32, TP4 ratio 2
+      2560,   // 16->48, TP4 ratio 3
+      3072,   // 16->64, TP4 ratio 4
+      4096,   // 16->32, TP2 ratio 2
+      5120,   // 16->48, TP2 ratio 3
+      6144,   // 16->64, TP2 ratio 4
+      8192,   // 16->32, TP1 ratio 2
+      10240,  // 16->48, TP1 ratio 3
+      12288,  // 16->64, TP1 ratio 4
+  };
+}
+
 void RunDenseNoBiasNoActivationCase(const torch::TensorOptions& tensor_options,
                                     int64_t dim) {
   constexpr int64_t batch = 2;
@@ -460,6 +478,17 @@ TEST_F(TritonCausalConv1dUpdateV2Test, VarlenApcDecodeDim1024Test) {
   }
 
   RunVarlenApcDecodeCase(tensor_options_, device_str_, 1024);
+}
+
+TEST_F(TritonCausalConv1dUpdateV2Test, QwenGdnMixedQkvDimsTest) {
+  if (!npu_available_) {
+    GTEST_SKIP() << "NPU device not available";
+  }
+
+  for (const int64_t dim : QwenGdnMixedQkvDims()) {
+    SCOPED_TRACE("dim=" + std::to_string(dim));
+    RunVarlenApcDecodeCase(tensor_options_, device_str_, dim);
+  }
 }
 
 TEST_F(TritonCausalConv1dUpdateV2Test, DenseNoBiasNoActivationWidth2Test) {

@@ -145,7 +145,6 @@ class TritonRecurrentGatedDeltaRuleTest : public ::testing::Test {
     if (npu_initialized_) {
       try {
         KernelRegistry::get_instance().cleanup();
-        torch_npu::finalize_npu();
       } catch (...) {
       }
     }
@@ -307,7 +306,25 @@ INSTANTIATE_TEST_SUITE_P(
         RecurrentTestParam{4, 1, 4, 8, 128, 0.2f, 0.1f, torch::kBFloat16},
         RecurrentTestParam{8, 1, 4, 8, 128, 0.3f, 1.0f, torch::kBFloat16},
         RecurrentTestParam{16, 1, 4, 8, 128, 0.2f, 1.0f, torch::kBFloat16},
-        RecurrentTestParam{32, 1, 4, 8, 128, 0.2f, 1.0f, torch::kBFloat16}));
+        RecurrentTestParam{32, 1, 4, 8, 128, 0.2f, 1.0f, torch::kBFloat16},
+        // Qwen3.5/Qwen3.6 local GDN shapes for TP1/2/4/8.
+        RecurrentTestParam{2, 1, 16, 16, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 8, 8, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 4, 4, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 2, 2, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 16, 32, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 8, 16, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 2, 4, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 16, 48, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 8, 24, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 4, 12, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 2, 6, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 16, 64, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 8, 32, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 4, 16, 128, 0.2f, 1.0f, torch::kBFloat16},
+        RecurrentTestParam{2, 1, 2, 8, 128, 0.2f, 1.0f, torch::kBFloat16},
+        // Regression for the previously observed TP4 spec-local shape.
+        RecurrentTestParam{2, 1, 1, 8, 128, 0.2f, 1.0f, torch::kBFloat16}));
 
 TEST_F(TritonRecurrentGatedDeltaRuleTest, SpecAccuracyAcceptedOffsets) {
   if (!npu_available_) {
@@ -426,6 +443,127 @@ TEST_F(TritonRecurrentGatedDeltaRuleTest, SpecAccuracyAcceptedOffsets) {
       (golden_states.to(torch::kFloat32) - states.to(torch::kFloat32)).abs();
   EXPECT_LT(state_diff.max().item<float>(), kStateAtol)
       << "Spec state mismatch: max diff = " << state_diff.max().item<float>();
+}
+
+TEST_F(TritonRecurrentGatedDeltaRuleTest, SpecAccuracyTp4LocalShape) {
+  if (!npu_available_) {
+    GTEST_SKIP() << "NPU device not available";
+  }
+
+  auto device = at::Device(device_str_);
+  constexpr int64_t num_sequences = 8;
+  constexpr int64_t T = 2;
+  constexpr int64_t num_heads = 1;
+  constexpr int64_t num_v_heads = 8;
+  constexpr int64_t head_dim = 128;
+  constexpr float scale_val = 0.08838834764831845f;  // 1 / sqrt(128)
+  constexpr bool use_qk_l2norm_in_kernel = true;
+  const auto dtype = torch::kBFloat16;
+  const int64_t total_tokens = num_sequences * T;
+
+  torch::manual_seed(45);
+  auto q = torch::randn({num_sequences, T, num_heads, head_dim}, dtype);
+  auto k = torch::randn({num_sequences, T, num_heads, head_dim}, dtype);
+  auto v = torch::randn({num_sequences, T, num_v_heads, head_dim}, dtype);
+  auto beta = torch::rand({num_sequences, T, num_v_heads}, dtype).sigmoid();
+  auto g =
+      torch::log_sigmoid(torch::rand({num_sequences, T, num_v_heads},
+                                     torch::kFloat32));
+  auto initial_state =
+      torch::randn({64, num_v_heads, head_dim, head_dim}, torch::kFloat32);
+
+  auto state_indices =
+      (torch::arange(num_sequences * T, torch::kInt32).reshape({num_sequences, T}) +
+       8);
+  auto num_accepted_tokens =
+      torch::tensor({1, 2, 1, 2, 1, 2, 1, 2}, torch::kInt32);
+
+  auto q_d = q.reshape({1, total_tokens, num_heads, head_dim}).to(device);
+  auto k_d = k.reshape({1, total_tokens, num_heads, head_dim}).to(device);
+  auto v_d = v.reshape({1, total_tokens, num_v_heads, head_dim}).to(device);
+  auto g_d = g.reshape({1, total_tokens, num_v_heads}).to(device);
+  auto beta_d = beta.reshape({1, total_tokens, num_v_heads}).to(device);
+  auto init_d = initial_state.clone().to(device);
+  auto state_indices_d = state_indices.to(device);
+  auto num_accepted_tokens_d = num_accepted_tokens.to(device);
+
+  auto cu_seqlens =
+      torch::arange(num_sequences + 1,
+                    torch::TensorOptions().dtype(torch::kInt64).device(device)) *
+      T;
+
+  std::vector<torch::Tensor> ref_chunks;
+  std::vector<torch::Tensor> ref_state_chunks;
+  for (int64_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx) {
+    auto q_i = q_d.slice(1, seq_idx * T, (seq_idx + 1) * T).cpu();
+    auto k_i = k_d.slice(1, seq_idx * T, (seq_idx + 1) * T).cpu();
+    auto v_i = v_d.slice(1, seq_idx * T, (seq_idx + 1) * T).cpu();
+    auto g_i = g_d.slice(1, seq_idx * T, (seq_idx + 1) * T).cpu();
+    auto beta_i = beta_d.slice(1, seq_idx * T, (seq_idx + 1) * T).cpu();
+    auto accepted_idx = num_accepted_tokens[seq_idx].item<int>() - 1;
+    auto state_idx = state_indices.index({seq_idx, accepted_idx}).item<int>();
+    auto h = initial_state.index({state_idx}).unsqueeze(0);
+    auto q_i_expanded = q_i.repeat_interleave(num_v_heads / num_heads, 2);
+    auto k_i_expanded = k_i.repeat_interleave(num_v_heads / num_heads, 2);
+    if (use_qk_l2norm_in_kernel) {
+      q_i_expanded = l2norm(q_i_expanded, -1, 1e-6f).to(dtype);
+      k_i_expanded = l2norm(k_i_expanded, -1, 1e-6f).to(dtype);
+    }
+
+    std::vector<torch::Tensor> seq_outputs;
+    std::vector<torch::Tensor> seq_states;
+    for (int64_t token_idx = 0; token_idx < T; ++token_idx) {
+      auto [ref_i, h_next] =
+          torch_recurrent_gated_delta_rule(q_i_expanded.slice(1, token_idx, token_idx + 1),
+                                           k_i_expanded.slice(1, token_idx, token_idx + 1),
+                                           v_i.slice(1, token_idx, token_idx + 1),
+                                           g_i.slice(1, token_idx, token_idx + 1),
+                                           beta_i.slice(1, token_idx, token_idx + 1),
+                                           h,
+                                           true,
+                                           std::optional<float>(scale_val));
+      seq_outputs.emplace_back(ref_i);
+      seq_states.emplace_back(h_next.squeeze(0));
+      h = h_next;
+    }
+    ref_chunks.emplace_back(torch::cat(seq_outputs, 1));
+    ref_state_chunks.emplace_back(torch::stack(seq_states, 0));
+  }
+  auto golden_o =
+      torch::cat(ref_chunks, 1).reshape({num_sequences, T, num_v_heads, head_dim});
+  auto golden_states = torch::cat(ref_state_chunks, 0);
+
+  auto npu_stream = c10_npu::getCurrentNPUStream(kDeviceId);
+  auto [o_d, state_d] =
+      npu_fused_recurrent_gated_delta_rule(q_d,
+                                           k_d,
+                                           v_d,
+                                           g_d,
+                                           beta_d,
+                                           scale_val,
+                                           init_d,
+                                           true,
+                                           cu_seqlens,
+                                           state_indices_d,
+                                           num_accepted_tokens_d,
+                                           use_qk_l2norm_in_kernel);
+  aclrtSynchronizeStream(npu_stream.stream());
+
+  auto o = o_d.cpu().reshape(golden_o.sizes());
+  auto flat_state_indices = state_indices.reshape({-1}).to(torch::kLong);
+  auto states = state_d.cpu().index_select(0, flat_state_indices);
+
+  auto output_diff =
+      (golden_o.to(torch::kFloat32) - o.to(torch::kFloat32)).abs();
+  EXPECT_LT(output_diff.max().item<float>(), kOutputAtol)
+      << "TP4-local spec output mismatch: max diff = "
+      << output_diff.max().item<float>();
+
+  auto state_diff =
+      (golden_states.to(torch::kFloat32) - states.to(torch::kFloat32)).abs();
+  EXPECT_LT(state_diff.max().item<float>(), kStateAtol)
+      << "TP4-local spec state mismatch: max diff = "
+      << state_diff.max().item<float>();
 }
 
 }  // namespace xllm::kernel::npu

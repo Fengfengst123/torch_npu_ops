@@ -222,11 +222,37 @@ def torch_sigmoid_gating_delta_rule_update(
     return out, next_state
 
 
-@pytest.mark.parametrize("batch", [1, 2, 4, 8])
-def test_fused_sigmoid_gating_delta_rule_update_dynamic_batch(batch):
+@pytest.mark.parametrize(
+    "batch,H,HV",
+    [
+        (1, 8, 16),
+        (2, 8, 16),
+        (4, 8, 16),
+        (8, 8, 16),
+        # Qwen3.5/Qwen3.6 local GDN shapes for TP1/2/4/8.
+        (4, 16, 16),
+        (4, 8, 8),
+        (4, 4, 4),
+        (4, 2, 2),
+        (4, 16, 32),
+        (4, 4, 8),
+        (4, 2, 4),
+        (4, 16, 48),
+        (4, 8, 24),
+        (4, 4, 12),
+        (4, 2, 6),
+        (4, 16, 64),
+        (4, 8, 32),
+        (4, 4, 16),
+        (4, 2, 8),
+        # Regression for the previously observed TP4 spec-local shape.
+        (4, 1, 8),
+    ],
+)
+def test_fused_sigmoid_gating_delta_rule_update_dynamic_batch(batch, H, HV):
     device = "npu"
-    torch.manual_seed(47 + batch)
-    T, H, HV, K, V = 1, 8, 16, 128, 128
+    torch.manual_seed(47 + batch + H + HV)
+    T, K, V = 1, 128, 128
     dtype = torch.bfloat16
     scale = K**-0.5
     q = torch.randn(batch, T, H, K, dtype=dtype)

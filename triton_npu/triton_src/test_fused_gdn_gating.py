@@ -4,7 +4,7 @@ import torch_npu
 import triton.language as tl
 import pytest
 
-NUM_HEADS_TEST_CASES = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32)
+NUM_HEADS_TEST_CASES = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64)
 
 
 @triton.jit(do_not_specialize=["num_heads"])

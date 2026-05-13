@@ -181,6 +181,8 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
 
     auto& op = OperationFactory::instance().recurrent_gated_delta_rule_spec_fwd();
     auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+      const int64_t stride_init_state_token = initial_state.value().stride(0);
+      const int64_t stride_final_state_token = final_state.stride(0);
       ab.constructArgs(q_ptr,
                        k_ptr,
                        v_ptr,
@@ -196,7 +198,11 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
                        static_cast<int64_t>(N),
                        static_cast<int64_t>(seq),
                        stride_indices_seq,
-                       stride_indices_tok);
+                       stride_indices_tok,
+                       static_cast<int64_t>(num_k_head),
+                       static_cast<int64_t>(num_v_head),
+                       stride_init_state_token,
+                       stride_final_state_token);
     });
     if (ret != RT_ERROR_NONE) {
       LOG(ERROR) << "rtKernelLaunch failed for "
@@ -209,6 +215,10 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
 
   auto& op = OperationFactory::instance().recurrent_gated_delta_rule_fwd();
   auto ret = op.execute(stream, gridX, gridY, gridZ, [&](ArgsBuilder& ab) {
+    TORCH_CHECK(initial_state.has_value(),
+                "initial_state must be provided for recurrent_gated_delta_rule");
+    const int64_t stride_init_state_token = initial_state.value().stride(0);
+    const int64_t stride_final_state_token = final_state.stride(0);
     ab.constructArgs(q_ptr,
                      k_ptr,
                      v_ptr,
@@ -221,7 +231,11 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
                      ssm_state_indices_ptr,
                      scale_value,
                      static_cast<int64_t>(N),
-                     static_cast<int64_t>(seq));
+                     static_cast<int64_t>(seq),
+                     static_cast<int64_t>(num_k_head),
+                     static_cast<int64_t>(num_v_head),
+                     stride_init_state_token,
+                     stride_final_state_token);
   });
   if (ret != RT_ERROR_NONE) {
     LOG(ERROR) << "rtKernelLaunch failed for "
