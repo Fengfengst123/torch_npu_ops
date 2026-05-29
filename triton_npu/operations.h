@@ -17,6 +17,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 
 #include "operation_base.h"
 
@@ -207,6 +208,12 @@ class FusedQkvzbaSplitReshapeGqaR4Op final : public OperationBase {
  public:
   FusedQkvzbaSplitReshapeGqaR4Op()
       : OperationBase("fused_qkvzba_split_reshape_cat_gqa_r4_kernel") {}
+};
+
+class SplitRmsnormRopeOp final : public OperationBase {
+ public:
+  explicit SplitRmsnormRopeOp(std::string kernel_name)
+      : OperationBase(std::move(kernel_name)) {}
 };
 
 }  // namespace xllm::kernel::npu

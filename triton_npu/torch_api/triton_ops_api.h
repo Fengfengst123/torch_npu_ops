@@ -183,4 +183,18 @@ npu_fused_qkvzba_split_reshape_cat(torch::Tensor& mixed_qkvz,
                                    int32_t head_qk,
                                    int32_t head_v);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+npu_split_rmsnorm_rope(torch::Tensor& input,
+                       torch::Tensor& sin,
+                       torch::Tensor& cos,
+                       torch::Tensor& q_weight,
+                       torch::Tensor& k_weight,
+                       int64_t q_hidden_size,
+                       int64_t kv_hidden_size,
+                       int64_t head_dim,
+                       double eps,
+                       const std::optional<torch::Tensor>& q_bias = std::nullopt,
+                       const std::optional<torch::Tensor>& k_bias = std::nullopt,
+                       bool bias = false);
+
 }  // namespace xllm::kernel::npu

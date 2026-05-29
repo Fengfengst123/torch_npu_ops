@@ -31,7 +31,7 @@
 
 #include "args_builder.h"
 #include "kernel_registry.h"
-
+#include <iostream> 
 namespace xllm::kernel::npu {
 
 inline bool is_regular_file_path(const std::filesystem::path& path) {
@@ -105,6 +105,23 @@ inline std::vector<std::filesystem::path> get_candidate_binary_roots() {
   }
 
   return roots;
+}
+
+inline std::string resolve_npubin_path_by_kernel(const std::string& kernel_name) {
+
+  std::string kernel_file_name = kernel_name + ".npubin";
+  for (const auto& binary_root : get_candidate_binary_roots()) {
+    std::filesystem::path candidate_path = binary_root / kernel_file_name;
+    if (is_regular_file_path(candidate_path)) {
+      return candidate_path.string();
+    }
+  }
+#ifdef TRITON_BINARY_PATH
+    return (std::filesystem::path(TRITON_BINARY_PATH) / kernel_file_name)
+        .string();
+#else
+    return {};
+#endif
 }
 
 class OperationBase {

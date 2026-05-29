@@ -101,8 +101,8 @@ def validate_and_copy_kernels(
             print(f"ERROR: Binary file does not exist: {npubin_file}")
             sys.exit(1)
         
-        dest_npubin = dest_path / npubin_path.name
-        dest_json = dest_path / json_path.name
+        dest_npubin = dest_path / (kernel_name + ".npubin")
+        dest_json = dest_path / (kernel_name + ".json")
         
         try:
             shutil.copy2(npubin_path, dest_npubin)

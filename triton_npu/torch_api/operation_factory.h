@@ -186,6 +186,10 @@ class OperationFactory final {
         "fused_qkvzba_split_reshape_cat_gqa_r4_kernel");
   }
 
+  SplitRmsnormRopeOp& split_rmsnorm_rope(const std::string& kernel_name) {
+    return get_or_create_with_name<SplitRmsnormRopeOp>(kernel_name);
+  }
+
  private:
   OperationFactory() = default;
 
@@ -198,6 +202,20 @@ class OperationFactory final {
       return *static_cast<T*>(it->second.get());
     }
     auto p = std::make_unique<T>();
+    T* raw = p.get();
+    ops_.emplace(key, std::move(p));
+    return raw[0];
+  }
+
+  template <class T>
+  T& get_or_create_with_name(const std::string& key) {
+    static_assert(std::is_base_of_v<OperationBase, T>,
+                  "T must derive from OperationBase");
+    auto it = ops_.find(key);
+    if (it != ops_.end()) {
+      return *static_cast<T*>(it->second.get());
+    }
+    auto p = std::make_unique<T>(key);
     T* raw = p.get();
     ops_.emplace(key, std::move(p));
     return raw[0];

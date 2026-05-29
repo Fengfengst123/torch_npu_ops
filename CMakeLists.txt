@@ -30,6 +30,7 @@ set(TRITON_NPU_API_SRCS
   triton_npu/torch_api/npu_triton_fused_sigmoid_gating_delta_rule_update.cpp
   triton_npu/torch_api/npu_triton_chunk_gated_delta_rule.cpp
   triton_npu/torch_api/npu_triton_fused_qkvzba_split_reshape.cpp
+  triton_npu/torch_api/npu_triton_split_rmsnorm_rope.cpp
 )
 
 cc_library(
@@ -60,7 +61,7 @@ endif()
 
 message(STATUS "TRITON_BINARY_PATH = ${TRITON_BIN_PATH}")
 
-target_compile_definitions(triton_adapter PRIVATE
+target_compile_definitions(triton_adapter PUBLIC
   TRITON_BINARY_PATH="${TRITON_BIN_PATH}"
 )
 
