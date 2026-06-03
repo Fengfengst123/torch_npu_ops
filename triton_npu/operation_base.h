@@ -28,6 +28,7 @@
 #include <string>
 #include <system_error>
 #include <vector>
+#include <torch_npu/csrc/framework/OpCommand.h>
 
 #include "args_builder.h"
 #include "kernel_registry.h"
@@ -130,22 +131,7 @@ class OperationBase {
       : kernel_name_(std::move(kernel_name)),
         npubin_path_(std::move(npubin_path)) {}
 
-  virtual ~OperationBase() {
-    std::lock_guard<std::mutex> guard(pending_mu_);
-    for (auto& pending : pending_releases_) {
-      if (pending.event != nullptr) {
-        aclrtSynchronizeEvent(pending.event);
-        aclrtDestroyEvent(pending.event);
-      }
-      if (pending.workspace) {
-        aclrtFree(pending.workspace);
-      }
-      if (pending.lock) {
-        aclrtFree(pending.lock);
-      }
-    }
-    pending_releases_.clear();
-  }
+  virtual ~OperationBase() = default;
 
   template <class BuildArgsFn>
   rtError_t execute(rtStream_t stream,
@@ -193,7 +179,6 @@ class OperationBase {
         KernelRegistry::get_instance().get_kernel_stub(kernel_name_);
     if (stub == nullptr) {
       LOG(ERROR) << "Kernel stub is null for '" << kernel_name_ << "'";
-      cleanup_workspace(workspace, lock);
       return static_cast<rtError_t>(-1);
     }
 
@@ -203,47 +188,6 @@ class OperationBase {
                             static_cast<uint32_t>(ab.size()),
                             nullptr,
                             stream);
-
-    if (capture_status != ACL_MODEL_RI_CAPTURE_STATUS_NONE) {
-      cleanup_workspace(workspace, lock);
-      cleanup_completed_releases();
-      return rt_ret;
-    }
-
-    // In graph capture mode, aclrtRecordEvent is not supported (207000).
-    // We skip async release and free workspace immediately, because graph
-    // capture only records operations; the actual execution happens later
-    // when the graph is replayed, and the graph mempool manages temporary
-    // allocations independently.
-    // In eager mode, we use an event to release workspace asynchronously
-    // without blocking the host.
-    aclrtEvent event = nullptr;
-    auto event_ret = aclrtCreateEvent(&event);
-    if (event_ret == ACL_ERROR_NONE) {
-      event_ret = aclrtRecordEvent(event, stream);
-      if (event_ret == ACL_ERROR_NONE) {
-        std::lock_guard<std::mutex> guard(pending_mu_);
-        pending_releases_.push_back({workspace, lock, event});
-      } else if (event_ret == ACL_ERROR_RT_FEATURE_NOT_SUPPORT) {
-        // Graph capture mode: event recording is unsupported.
-        // Destroy the created event and free workspace synchronously.
-        aclrtDestroyEvent(event);
-        cleanup_workspace(workspace, lock);
-      } else {
-        LOG(WARNING) << "aclrtRecordEvent failed for '" << kernel_name_
-                     << "': " << event_ret;
-        aclrtDestroyEvent(event);
-        cleanup_workspace(workspace, lock);
-      }
-    } else {
-      LOG(WARNING) << "aclrtCreateEvent failed for '" << kernel_name_
-                   << "': " << event_ret;
-      cleanup_workspace(workspace, lock);
-    }
-
-    // Opportunistically clean up completed releases from previous calls.
-    cleanup_completed_releases();
-
     return rt_ret;
   }
 
@@ -302,44 +246,25 @@ class OperationBase {
     reg.get_kernel_workspace_config(
         kernel_name_, workspace_size, lock_init_value, lock_num);
 
+    at::TensorOptions options =
+        at::TensorOptions(torch_npu::utils::get_npu_device_type());
     if (workspace_size > 0) {
       workspace_size *= static_cast<int64_t>(block_num);
-      const auto ret =
-          aclrtMalloc(workspace, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);
-      if (ret != ACL_ERROR_NONE) {
-        LOG(ERROR) << "aclrtMalloc workspace failed for '" << kernel_name_
-                   << "': " << ret;
-        return ret;
-      }
+      *workspace = const_cast<void *>(
+        at::empty({workspace_size}, options.dtype(at::kByte)).storage().data());
     }
 
     if (lock_num > 0) {
       const uint64_t bytes = static_cast<uint64_t>(lock_num) * sizeof(int64_t);
-      auto ret = aclrtMalloc(lock, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
-      if (ret != ACL_ERROR_NONE) {
-        LOG(ERROR) << "aclrtMalloc lock failed for '" << kernel_name_
-                   << "': " << ret;
-        if (*workspace) {
-          aclrtFree(*workspace);
-          *workspace = nullptr;
-        }
-        return ret;
-      }
+      *lock = const_cast<void *>(
+        at::empty({bytes}, options.dtype(at::kByte)).storage().data());
 
       std::vector<int64_t> init(static_cast<size_t>(lock_num), lock_init_value);
-      ret = aclrtMemcpy(
+      auto ret = aclrtMemcpy(
           *lock, bytes, init.data(), bytes, ACL_MEMCPY_HOST_TO_DEVICE);
       if (ret != ACL_ERROR_NONE) {
         LOG(ERROR) << "aclrtMemcpy lock init failed for '" << kernel_name_
                    << "': " << ret;
-        if (*workspace) {
-          aclrtFree(*workspace);
-          *workspace = nullptr;
-        }
-        if (*lock) {
-          aclrtFree(*lock);
-          *lock = nullptr;
-        }
         return ret;
       }
     }
