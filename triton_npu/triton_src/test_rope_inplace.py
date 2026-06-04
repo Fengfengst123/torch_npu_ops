@@ -3,6 +3,17 @@ import triton.language as tl
 import torch
 import pytest
 
+# triton 3.2.1 change the location of extract_slice and insert_slice, so we need to try both location for compatibility
+try:
+    from triton.language import extract_slice
+    from triton.language import insert_slice
+except ImportError:
+    from triton.language.extra.cann.extension import extract_slice
+    from triton.language.extra.cann.extension import insert_slice
+    tl.extract_slice = extract_slice
+    tl.insert_slice = insert_slice
+
+
 @triton.jit(do_not_specialize=['head_num'])
 def rope_inplace_kernel(
     x_ptr, # [bs, qhead, 512]
