@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import hashlib
 import os
+import platform
 import sys
 import re
 import json
@@ -122,31 +124,97 @@ def validate_and_copy_kernels(
     print(f"INFO: Summary - Copied: {copied_count}")
 
 
+def compute_fingerprint(script_dir: str) -> str:
+    """Compute a SHA-256 fingerprint of all inputs that affect binary generation."""
+    hasher = hashlib.sha256()
+
+    triton_src_dir = Path(script_dir) / "triton_src"
+    if triton_src_dir.exists():
+        for py_file in sorted(triton_src_dir.rglob("*.py")):
+            rel = py_file.relative_to(script_dir)
+            hasher.update(f"FILE:{rel}\n".encode())
+            hasher.update(py_file.read_bytes())
+
+    setup_py = Path(script_dir) / "setup.py"
+    if setup_py.exists():
+        hasher.update(b"FILE:setup.py\n")
+        hasher.update(setup_py.read_bytes())
+
+    hasher.update(f"PYTHON:{platform.python_version()}\n".encode())
+    try:
+        import torch
+        hasher.update(f"TORCH:{torch.__version__}\n".encode())
+    except ImportError:
+        hasher.update(b"TORCH:UNAVAILABLE\n")
+    try:
+        import torch_npu
+        hasher.update(f"TORCH_NPU:{torch_npu.__version__}\n".encode())
+    except ImportError:
+        hasher.update(b"TORCH_NPU:UNAVAILABLE\n")
+
+    return hasher.hexdigest()
+
+
+def is_cache_valid(binary_path: str, fingerprint: str) -> bool:
+    """Check if existing binaries match the current fingerprint."""
+    fp_file = Path(binary_path) / ".cache_fingerprint"
+    if not fp_file.exists():
+        return False
+
+    stored = fp_file.read_text().strip()
+    if stored != fingerprint:
+        return False
+
+    if not list(Path(binary_path).glob("*.npubin")):
+        return False
+
+    return True
+
+
+def write_fingerprint(binary_path: str, fingerprint: str) -> None:
+    fp_file = Path(binary_path) / ".cache_fingerprint"
+    fp_file.write_text(fingerprint + "\n")
+    print(f"INFO: Wrote cache fingerprint to {fp_file}")
+
+
 def main():
     script_dir = Path(__file__).parent
-    test_dir = script_dir  # run all pytest in current directory
+    test_dir = script_dir
 
     triton_cache_dir = os.getenv("TRITON_CACHE_DIR", "/root/.triton/cache")
     binary_path = os.getenv("TRITON_BINARY_PATH")
-    
+
     if not binary_path:
         script_path = os.path.dirname(os.path.abspath(__file__))
         binary_path = os.path.join(script_path, "binary")
-        os.makedirs(binary_path, exist_ok=True)
+
+    os.makedirs(binary_path, exist_ok=True)
+
+    fingerprint = compute_fingerprint(str(script_dir))
+    print(f"INFO: Computed source fingerprint: {fingerprint[:16]}...")
+
+    if is_cache_valid(binary_path, fingerprint):
+        npubin_count = len(list(Path(binary_path).glob("*.npubin")))
+        print(f"INFO: Cache hit - {npubin_count} binary(ies) up to date, skipping generation.")
+        return
+
+    print("INFO: Cache miss - regenerating Triton NPU binaries.")
 
     print(f"INFO: Clearing triton cache directory: {triton_cache_dir}")
     clear_triton_cache(triton_cache_dir)
-    
+
     print(f"INFO: Running pytest on all tests under {test_dir} ...")
     run_pytest(str(test_dir))
-    
+
     print(f"INFO: Scanning for kernel binaries in {triton_cache_dir} and its subdirectories...")
     kernel_map = find_kernel_binaries(triton_cache_dir)
     print(f"INFO: Found {len(kernel_map)} unique kernel(s)")
-    
+
     print(f"INFO: Copying all found kernels to {binary_path}...")
     validate_and_copy_kernels(kernel_map, binary_path)
-    
+
+    write_fingerprint(binary_path, fingerprint)
+
     print("INFO: Script completed successfully")
 
 

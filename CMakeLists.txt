@@ -56,7 +56,7 @@ cc_library(
 if(DEFINED ENV{TRITON_BINARY_PATH} AND NOT "$ENV{TRITON_BINARY_PATH}" STREQUAL "")
   set(TRITON_BIN_PATH "$ENV{TRITON_BINARY_PATH}")
 else()
-  set(TRITON_BIN_PATH "${CMAKE_CURRENT_SOURCE_DIR}/triton_npu/binary")
+  set(TRITON_BIN_PATH "${CMAKE_CURRENT_BINARY_DIR}/triton_npu/binary")
 endif()
 
 message(STATUS "TRITON_BINARY_PATH = ${TRITON_BIN_PATH}")
@@ -84,14 +84,31 @@ cc_library(
 )
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_custom_command(
-  TARGET triton_adapter POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E env
-  TRITON_BINARY_PATH=${TRITON_BIN_PATH}
-  ${Python3_EXECUTABLE} setup.py
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/triton_npu
-  COMMENT "Running triton_npu/setup.py to build/update Triton kernels."
+
+file(GLOB_RECURSE TRITON_KERNEL_SOURCES
+  "${CMAKE_CURRENT_SOURCE_DIR}/triton_npu/triton_src/*.py"
 )
+
+set(TRITON_NPU_STAMP_FILE "${CMAKE_CURRENT_BINARY_DIR}/triton_npu_binaries.stamp")
+
+add_custom_command(
+  OUTPUT ${TRITON_NPU_STAMP_FILE}
+  COMMAND ${CMAKE_COMMAND} -E env
+    TRITON_BINARY_PATH=${TRITON_BIN_PATH}
+    ${Python3_EXECUTABLE} setup.py
+  COMMAND ${CMAKE_COMMAND} -E touch ${TRITON_NPU_STAMP_FILE}
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/triton_npu
+  COMMENT "Generating Triton NPU kernel binaries into ${TRITON_BIN_PATH}"
+  DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/triton_npu/setup.py
+    ${TRITON_KERNEL_SOURCES}
+)
+
+add_custom_target(triton_npu_binaries
+  DEPENDS ${TRITON_NPU_STAMP_FILE}
+)
+
+add_dependencies(triton_adapter triton_npu_binaries)
 
 target_include_directories(torch_npu_kernels PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
