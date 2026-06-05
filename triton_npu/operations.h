@@ -111,6 +111,12 @@ class LayerNormFwdFastRMSBF16ZNoBiasOp final : public OperationBase {
       : OperationBase("layer_norm_fwd_kernel_fast_rms_bf16_z_nobias") {}
 };
 
+class LayerNormFwdFastRMSBF16ZNoBiasNoMaskOp final : public OperationBase {
+ public:
+  LayerNormFwdFastRMSBF16ZNoBiasNoMaskOp()
+      : OperationBase("layer_norm_fwd_kernel_fast_rms_bf16_z_nobias_nomask") {}
+};
+
 class RecurrentGatedDeltaRuleFwdOp final : public OperationBase {
  public:
   RecurrentGatedDeltaRuleFwdOp()

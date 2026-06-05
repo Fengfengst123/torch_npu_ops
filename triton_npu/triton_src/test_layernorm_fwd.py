@@ -1034,9 +1034,11 @@ def layer_norm_fwd_kernel_fast_rms_bf16_z_nobias(
         Rstd_base = Rstd + curr_row + group * M
 
         x = tl.load(X_base + cols, mask=mask, other=0.).to(tl.float32)
+        # Z reuse: load z early, compute gate, overlap with x*x reduction
+        z = tl.load(Z_base + cols, mask=mask).to(tl.float32)
+        gate = z * tl.sigmoid(z)
         if not NORM_BEFORE_GATE:
-            z = tl.load(Z_base + cols, mask=mask).to(tl.float32)
-            x *= z * tl.sigmoid(z)
+            x *= gate
         mean_sq = tl.sum(x * x, axis=0) / N
         rstd = 1 / tl.sqrt(mean_sq + eps)
         tl.store(Rstd_base, rstd)
@@ -1044,9 +1046,71 @@ def layer_norm_fwd_kernel_fast_rms_bf16_z_nobias(
         x_hat = x * rstd
         y = x_hat * w
         if NORM_BEFORE_GATE:
-            z = tl.load(Z_base + cols, mask=mask).to(tl.float32)
-            y *= z * tl.sigmoid(z)
+            y *= gate
         tl.store(Y_base + cols, y.to(tl.bfloat16), mask=mask)
+
+
+# =============================================================================
+# No-mask variant: for N == BLOCK_N (mask always true, skip mask overhead)
+# Specialized for Qwen3.5-9B GDN gated RMSNorm: bf16, z=gating, no bias
+# =============================================================================
+@triton.jit(
+    do_not_specialize=["M", "N", "eps", "N_CORES"]
+)
+def layer_norm_fwd_kernel_fast_rms_bf16_z_nobias_nomask(
+    X, Y, W, B, Z, Mean, Rstd,
+    stride_x_row,
+    stride_y_row,
+    stride_z_row,
+    M,
+    N,
+    eps,
+    N_CORES,
+    NORM_BEFORE_GATE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    row = tl.program_id(0)
+    group = tl.program_id(1)
+
+    BLOCK_ROWS = M if M < N_CORES else N_CORES
+    base_iters = M // BLOCK_ROWS
+    remain = M % BLOCK_ROWS
+    n_iters = base_iters
+    if row < remain:
+        n_iters = n_iters + 1
+
+    if row < remain:
+        start_row = row * n_iters
+    else:
+        start_row = remain * (base_iters + 1) + (row - remain) * base_iters
+
+    cols = tl.arange(0, BLOCK_N)
+
+    W_base = W + group * N
+    w = tl.load(W_base + cols).to(tl.float32)
+
+    for i in tl.range(n_iters):
+        curr_row = start_row + i
+        X_base = X + curr_row * stride_x_row + group * N
+        Y_base = Y + curr_row * stride_y_row + group * N
+        Z_base = Z + curr_row * stride_z_row + group * N
+        Rstd_base = Rstd + curr_row + group * M
+
+        x = tl.load(X_base + cols).to(tl.float32)
+        # Z reuse: load z early, compute gate, overlap with x*x reduction
+        z = tl.load(Z_base + cols).to(tl.float32)
+        gate = z * tl.sigmoid(z)
+        if not NORM_BEFORE_GATE:
+            x *= gate
+        mean_sq = tl.sum(x * x, axis=0) / N
+        rstd = 1 / tl.sqrt(mean_sq + eps)
+        tl.store(Rstd_base, rstd)
+
+        x_hat = x * rstd
+        y = x_hat * w
+        if NORM_BEFORE_GATE:
+            y *= gate
+        tl.store(Y_base + cols, y.to(tl.bfloat16))
 
 
 # =============================================================================
@@ -1272,12 +1336,18 @@ def _layer_norm_fwd_fast_z(
 
     n_cores = min(M, vector_cores)
     grid = (n_cores, ngroups)
+    use_nomask = group_size == 128 and M >= 1024
 
     with torch.npu.device(x.device.index):
         if x.dtype == torch.bfloat16:
             if is_rms_norm:
                 if bias is None:
-                    layer_norm_fwd_kernel_fast_rms_bf16_z_nobias[grid](
+                    kernel = (
+                        layer_norm_fwd_kernel_fast_rms_bf16_z_nobias_nomask
+                        if use_nomask else
+                        layer_norm_fwd_kernel_fast_rms_bf16_z_nobias
+                    )
+                    kernel[grid](
                         x, out, weight, bias, z, mean, rstd,
                         x.stride(0), out.stride(0),
                         z.stride(0) if z is not None else 0,
@@ -1505,3 +1575,31 @@ def test_layer_norm_fast(batch, seq, feat, bias, z, gate, rms, gs, dtype):
     # bf16 has lower precision, so use a looser tolerance
     tol = 5e-2 if dtype == torch.bfloat16 else 1e-3
     assert max_abs < tol, f"abs err {max_abs} > {tol}"
+
+
+@pytest.mark.parametrize("batch,seq,feat", [(1024, 1, 128)])
+def test_layer_norm_fast_bf16_z_nobias_nomask_aot(batch, seq, feat):
+    torch.manual_seed(42)
+    scale = 0.5
+    x = torch.randn(batch, seq, feat, dtype=torch.bfloat16, device="npu") * scale
+    w = torch.randn(feat, dtype=torch.bfloat16, device="npu") * scale
+    z = torch.randn(batch, seq, feat, dtype=torch.bfloat16, device="npu") * scale
+
+    out = layer_norm_fwd(
+        x.reshape(-1, feat), w, None, eps=1e-6,
+        z=z.reshape(-1, feat),
+        group_size=128,
+        norm_before_gate=True, is_rms_norm=True,
+    )
+
+    ref = _golden_ref(
+        x, w, None, eps=1e-6, z=z,
+        group_size=128,
+        norm_before_gate=True, is_rms_norm=True,
+    )
+
+    max_abs = torch.max(
+        torch.abs(out.cpu().reshape(ref.shape).to(torch.float32) -
+                  ref.to(torch.float32))
+    ).item()
+    assert max_abs < 5e-2, f"abs err {max_abs} > 0.05"

@@ -32,6 +32,7 @@
 namespace xllm::kernel::npu {
 constexpr int32_t kDeviceId = 0;
 constexpr float kTolerance = 1e-3f;
+constexpr float kBfloat16Tolerance = 5e-2f;
 
 torch::Tensor layer_norm_golden_cpu(
     const torch::Tensor& x,
@@ -122,23 +123,7 @@ class TritonLayerNormFwdTest : public ::testing::Test {
     try {
       torch::zeros({1}, torch::TensorOptions().device("npu:0"));
       torch_npu::init_npu("npu:" + std::to_string(kDeviceId));
-
-      auto& reg = KernelRegistry::get_instance();
-
-      // Register fallback kernel
-      std::string binary_path =
-          GetKernelBinaryPath("layer_norm_fwd_kernel.npubin");
-      npu_initialized_ =
-          reg.register_kernel("layer_norm_fwd_kernel", binary_path) &&
-          reg.get_kernel_stub("layer_norm_fwd_kernel") != nullptr;
-
-      // Register fast kernel
-      std::string fast_binary_path =
-          GetKernelBinaryPath("layer_norm_fwd_kernel_fast.npubin");
-      npu_initialized_ =
-          npu_initialized_ &&
-          reg.register_kernel("layer_norm_fwd_kernel_fast", fast_binary_path) &&
-          reg.get_kernel_stub("layer_norm_fwd_kernel_fast") != nullptr;
+      npu_initialized_ = true;
     } catch (...) {
       npu_initialized_ = false;
     }
@@ -300,6 +285,56 @@ TEST_F(TritonLayerNormFwdTest, KernelTestFallbackLarge) {
   EXPECT_LT(output_max_diff, kTolerance)
       << "Fallback (large) LayerNorm output max diff (" << output_max_diff
       << ") > tolerance (" << kTolerance << ")";
+}
+
+TEST_F(TritonLayerNormFwdTest, KernelTestFastRMSBF16ZNoBiasNoMask) {
+  if (!npu_available_) {
+    GTEST_SKIP() << "NPU device not available";
+  }
+
+  ASSERT_TRUE(KernelBinaryExists(
+      "layer_norm_fwd_kernel_fast_rms_bf16_z_nobias_nomask.npubin"));
+
+  auto device = at::Device(device_str_);
+
+  int64_t batch_size = 1024;
+  int64_t seq_len = 1;
+  int64_t hidden_dim = 128;
+  float eps = 1e-6;
+  int64_t group_size = hidden_dim;
+  float scale = 0.5f;
+
+  auto tensor_options =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(device);
+
+  auto x = torch::randn({batch_size, seq_len, hidden_dim}, tensor_options) *
+           scale;
+  auto weight = torch::randn({hidden_dim}, tensor_options) * scale;
+  torch::Tensor bias;
+  auto z = torch::randn({batch_size, seq_len, hidden_dim}, tensor_options) *
+           scale;
+  std::optional<torch::Tensor> z_optional = z;
+
+  auto output_golden = layer_norm_golden_cpu(
+      x, weight, bias, eps, z_optional, group_size, true, true);
+  auto npu_stream = c10_npu::getCurrentNPUStream(0);
+  auto output = xllm::kernel::npu::layer_norm_fwd(
+      x, weight, bias, eps, z_optional, group_size, true, true);
+  aclrtSynchronizeStream(npu_stream.stream());
+
+  EXPECT_TRUE(KernelRegistry::get_instance().is_kernel_registered(
+      "layer_norm_fwd_kernel_fast_rms_bf16_z_nobias_nomask"));
+
+  auto output_golden_cpu = output_golden.cpu().contiguous();
+  auto output_cpu = output.cpu().contiguous();
+
+  auto output_diff = torch::abs(output_cpu.to(torch::kFloat32) -
+                               output_golden_cpu.to(torch::kFloat32));
+  float output_max_diff = torch::max(output_diff).item().to<float>();
+
+  EXPECT_LT(output_max_diff, kBfloat16Tolerance)
+      << "No-mask bf16 RMS LayerNorm output max diff (" << output_max_diff
+      << ") > tolerance (" << kBfloat16Tolerance << ")";
 }
 
 }  // namespace xllm::kernel::npu

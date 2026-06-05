@@ -122,11 +122,20 @@ torch::Tensor layer_norm_fwd(torch::Tensor& x,
     const bool has_z = z.has_value();
     const bool has_bias = bias.defined();
 
+    // No-mask path: use nomask kernel only for prefill (M >= 1024)
+    // Decode (M < 1024) keeps mask kernel (nomask has no benefit or slightly slower)
+    // Benchmark: M=1~512 noise ±2%, M=2048 +2%, M=8192 +14%, M=20000 +20%
+    const bool use_nomask = (group_size_val == 128) && (M >= 1024);
+
     if (has_z) {
       // Fast kernel with Z (HAS_Z=True, 7 pointer args including Z)
       OperationBase& op = [&]() -> OperationBase& {
         if (is_rms_norm) {
           if (is_bf16) {
+            if (!has_bias && use_nomask) {
+              return static_cast<OperationBase&>(
+                  OperationFactory::instance().layer_norm_fwd_fast_rms_bf16_z_nobias_nomask());
+            }
             return has_bias
                 ? static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_bf16_z_bias())
                 : static_cast<OperationBase&>(OperationFactory::instance().layer_norm_fwd_fast_rms_bf16_z_nobias());

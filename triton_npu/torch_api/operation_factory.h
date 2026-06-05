@@ -104,6 +104,12 @@ class OperationFactory final {
         "layer_norm_fwd_kernel_fast_rms_bf16_z_nobias");
   }
 
+  LayerNormFwdFastRMSBF16ZNoBiasNoMaskOp&
+  layer_norm_fwd_fast_rms_bf16_z_nobias_nomask() {
+    return get_or_create<LayerNormFwdFastRMSBF16ZNoBiasNoMaskOp>(
+        "layer_norm_fwd_kernel_fast_rms_bf16_z_nobias_nomask");
+  }
+
   RecurrentGatedDeltaRuleFwdOp& recurrent_gated_delta_rule_fwd() {
     return get_or_create<RecurrentGatedDeltaRuleFwdOp>(
         "fused_recurrent_gated_delta_rule_fwd_kernel");
