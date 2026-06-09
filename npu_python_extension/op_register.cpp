@@ -23,6 +23,8 @@ limitations under the License.
 
 #include "../ascendc_npu/ascendc_ops_api.h"
 
+namespace py = pybind11;
+
 std::tuple<torch::Tensor, torch::Tensor> py_npu_gemma_rms_norm(
     const torch::Tensor& x,
     const torch::Tensor& gamma,
@@ -33,7 +35,30 @@ std::tuple<torch::Tensor, torch::Tensor> py_npu_gemma_rms_norm(
     return std::make_tuple(rstd_out, y_out);
 }
 
+torch::Tensor py_npu_layer_norm_fwd(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const c10::optional<torch::Tensor>& bias,
+    double eps,
+    const c10::optional<torch::Tensor>& z,
+    int64_t group_size,
+    bool norm_before_gate,
+    bool is_rms_norm) {
+    return npu_ops::layer_norm_fwd(
+        x, weight, bias, eps, z, group_size, norm_before_gate, is_rms_norm);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("gemma_rms_norm", &py_npu_gemma_rms_norm,
           "gemma_rms_norm using EXEC_NPU_CMD (aclnnGemmaRmsNorm)");
+    m.def("layer_norm_fwd", &py_npu_layer_norm_fwd,
+          "layer_norm_fwd using EXEC_NPU_CMD (aclnnLayerNormFwd)",
+          py::arg("x"),
+          py::arg("weight"),
+          py::arg("bias"),
+          py::arg("eps"),
+          py::arg("z"),
+          py::arg("group_size"),
+          py::arg("norm_before_gate"),
+          py::arg("is_rms_norm"));
 }

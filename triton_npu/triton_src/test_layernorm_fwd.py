@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 import pytest
 import ctypes
+import os
 
 
 # =============================================================================
@@ -1192,6 +1193,27 @@ def layer_norm_fwd_kernel(
 # =============================================================================
 # Python wrappers
 # =============================================================================
+def _layer_norm_fwd_ascendc(
+    x, weight, bias, eps,
+    z=None, group_size=None,
+    norm_before_gate=True, is_rms_norm=False,
+):
+    try:
+        import npu_python_extension_lib
+    except ImportError as exc:
+        raise RuntimeError(
+            "XLLM_LAYER_NORM_BACKEND=ascendc requires npu_python_extension_lib. "
+            "Build third_party/torch_npu_ops/npu_python_extension first and ensure "
+            "ASCEND_CUSTOM_OPP_PATH points to the custom LayerNormFwd OPP package."
+        ) from exc
+
+    if group_size is None:
+        group_size = x.shape[-1]
+    return npu_python_extension_lib.layer_norm_fwd(
+        x, weight, bias, eps, z, group_size, norm_before_gate, is_rms_norm
+    )
+
+
 def _layer_norm_fwd_fast(
     x, weight, bias, eps,
     z=None, group_size=None,
@@ -1461,6 +1483,17 @@ def layer_norm_fwd(
     norm_before_gate=True, is_rms_norm=False,
 ):
     """Unified entry: auto-select fast or fallback kernel."""
+    backend = os.getenv("XLLM_LAYER_NORM_BACKEND", "triton").lower()
+    if backend == "ascendc":
+        return _layer_norm_fwd_ascendc(
+            x, weight, bias, eps, z,
+            group_size=group_size,
+            norm_before_gate=norm_before_gate,
+            is_rms_norm=is_rms_norm,
+        )
+    if backend != "triton":
+        raise ValueError(f"Unsupported XLLM_LAYER_NORM_BACKEND={backend!r}")
+
     M, N = x.shape
     if group_size is None:
         group_size = N

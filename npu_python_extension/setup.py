@@ -14,6 +14,7 @@ BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 source_files = [
     os.path.join(BASE_DIR, "op_register.cpp"),
     os.path.join(BASE_DIR, "..", "ascendc_npu", "gemma_rms_norm.cpp"),
+    os.path.join(BASE_DIR, "..", "ascendc_npu", "layer_norm_fwd.cpp"),
 ]
 
 exts = []
