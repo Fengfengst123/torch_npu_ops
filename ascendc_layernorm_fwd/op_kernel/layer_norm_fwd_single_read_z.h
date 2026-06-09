@@ -79,7 +79,6 @@ public:
         pipe.InitBuffer(outQueueRstd, 1, kBlockBytes);
         pipe.InitBuffer(zBuf, tileLength * sizeof(float));
         pipe.InitBuffer(tmpBuf, tileLength * sizeof(float));
-        pipe.InitBuffer(tmp2Buf, tileLength * sizeof(float));
     }
 
     __aicore__ inline void Process()
@@ -140,8 +139,7 @@ private:
             PipeBarrier<PIPE_V>();
         }
         LocalTensor<float> sigmoidLocal = tmpBuf.Get<float>();
-        LocalTensor<float> sigmoidTmp = tmp2Buf.Get<float>();
-        ComputeSigmoid(sigmoidLocal, gateLocal, sigmoidTmp, tileLength);
+        ComputeSigmoid(sigmoidLocal, gateLocal, tileLength);
         Mul(gateLocal, gateLocal, sigmoidLocal, tileLength);
         PipeBarrier<PIPE_V>();
     }
@@ -182,6 +180,26 @@ private:
     __aicore__ inline void ApplyAffine(
         LocalTensor<float> xLocal, LocalTensor<float> yLocal, uint32_t currentLogicalRow, uint32_t currentNRow)
     {
+        if (groupCount <= 1) {
+            if (!nullptrGamma) {
+                LoadWeight(xLocal, gammaGm, 0);
+                for (uint32_t rowIdx = 0; rowIdx < currentNRow; ++rowIdx) {
+                    const uint32_t rowOffset = rowIdx * rowAlign;
+                    Mul(yLocal[rowOffset], yLocal[rowOffset], xLocal, rowSize);
+                    PipeBarrier<PIPE_V>();
+                }
+            }
+            if (!nullptrBeta) {
+                LoadWeight(xLocal, betaGm, 0);
+                for (uint32_t rowIdx = 0; rowIdx < currentNRow; ++rowIdx) {
+                    const uint32_t rowOffset = rowIdx * rowAlign;
+                    Add(yLocal[rowOffset], yLocal[rowOffset], xLocal, rowSize);
+                    PipeBarrier<PIPE_V>();
+                }
+            }
+            return;
+        }
+
         for (uint32_t rowIdx = 0; rowIdx < currentNRow; ++rowIdx) {
             const uint32_t logicalRow = currentLogicalRow + rowIdx;
             const uint32_t rowOffset = rowIdx * rowAlign;
@@ -205,9 +223,6 @@ private:
         if (sizeof(Tfm) == kHalfBytes) {
             if (std::is_same<Tfm, bfloat16_t>::value) {
                 Cast(yLocal.ReinterpretCast<Tfm>(), yLocal, RoundMode::CAST_ROUND, tileLength);
-            }
-            if (std::is_same<Tfm, half>::value) {
-                Cast(yLocal.ReinterpretCast<Tfm>(), yLocal, RoundMode::CAST_NONE, tileLength);
             }
             PipeBarrier<PIPE_V>();
         }
@@ -301,7 +316,6 @@ private:
     TQue<QuePosition::VECOUT, 1> outQueueRstd;
     TBuf<TPosition::VECCALC> zBuf;
     TBuf<TPosition::VECCALC> tmpBuf;
-    TBuf<TPosition::VECCALC> tmp2Buf;
 
     GlobalTensor<Tfm> xGm;
     GlobalTensor<Tfm> zGm;

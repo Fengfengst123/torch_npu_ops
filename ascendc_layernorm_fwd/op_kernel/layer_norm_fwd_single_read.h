@@ -152,6 +152,26 @@ protected:
     __aicore__ inline void ApplyAffine(
         LocalTensor<float> xLocal, LocalTensor<float> yLocal, uint32_t currentLogicalRow, uint32_t currentNRow)
     {
+        if (groupCount <= 1) {
+            if (!nullptrGamma) {
+                LoadWeight(xLocal, gammaGm, 0);
+                for (uint32_t rowIdx = 0; rowIdx < currentNRow; ++rowIdx) {
+                    const uint32_t rowOffset = rowIdx * rowAlign;
+                    Mul(yLocal[rowOffset], yLocal[rowOffset], xLocal, rowSize);
+                    PipeBarrier<PIPE_V>();
+                }
+            }
+            if (!nullptrBeta) {
+                LoadWeight(xLocal, betaGm, 0);
+                for (uint32_t rowIdx = 0; rowIdx < currentNRow; ++rowIdx) {
+                    const uint32_t rowOffset = rowIdx * rowAlign;
+                    Add(yLocal[rowOffset], yLocal[rowOffset], xLocal, rowSize);
+                    PipeBarrier<PIPE_V>();
+                }
+            }
+            return;
+        }
+
         for (uint32_t rowIdx = 0; rowIdx < currentNRow; ++rowIdx) {
             const uint32_t logicalRow = currentLogicalRow + rowIdx;
             const uint32_t rowOffset = rowIdx * rowAlign;
@@ -175,9 +195,6 @@ protected:
         if (sizeof(Tfm) == kHalfBytes) {
             if (std::is_same<Tfm, bfloat16_t>::value) {
                 Cast(yLocal.ReinterpretCast<Tfm>(), yLocal, RoundMode::CAST_ROUND, tileLength);
-            }
-            if (std::is_same<Tfm, half>::value) {
-                Cast(yLocal.ReinterpretCast<Tfm>(), yLocal, RoundMode::CAST_NONE, tileLength);
             }
             PipeBarrier<PIPE_V>();
         }

@@ -26,41 +26,6 @@ constexpr uint32_t kBlockBytes = 32;
 constexpr uint32_t kHalfBytes = 2;
 constexpr uint32_t kFloatBytes = 4;
 
-struct DataCopyContiguous {
-    uint32_t blockCount = 0;
-    uint32_t blockLen = 0;
-    uint32_t srcStride = 0;
-    uint32_t dstStride = 0;
-    bool isPad = false;
-    uint8_t leftPad = 0;
-    uint8_t rightPad = 0;
-};
-
-template <typename T>
-__aicore__ inline void DataCopyInContiguous(
-    LocalTensor<T> dst, GlobalTensor<T> src, const DataCopyContiguous& copy, uint32_t castOffset)
-{
-    DataCopyExtParams dataCopyParams;
-    DataCopyPadExtParams<T> padParams{copy.isPad, copy.leftPad, copy.rightPad, 0};
-    dataCopyParams.blockCount = copy.blockCount;
-    dataCopyParams.blockLen = copy.blockLen;
-    dataCopyParams.srcStride = copy.srcStride;
-    dataCopyParams.dstStride = copy.dstStride;
-    DataCopyPad(dst[(sizeof(T) == kHalfBytes) * castOffset], src, dataCopyParams, padParams);
-}
-
-template <typename T>
-__aicore__ inline void DataCopyOutContiguous(
-    GlobalTensor<T> dst, LocalTensor<T> src, const DataCopyContiguous& copy)
-{
-    DataCopyExtParams dataCopyParams;
-    dataCopyParams.blockCount = copy.blockCount;
-    dataCopyParams.blockLen = copy.blockLen;
-    dataCopyParams.srcStride = copy.srcStride;
-    dataCopyParams.dstStride = copy.dstStride;
-    DataCopyPad(dst, src, dataCopyParams);
-}
-
 template <HardEvent evt>
 __aicore__ inline void SetEvtFlag()
 {
@@ -94,23 +59,10 @@ __aicore__ inline uint32_t GetGroupOffset(uint32_t logicalRow, uint32_t groupCou
     return group * rowSize;
 }
 
-__aicore__ inline void ComputeSigmoid(LocalTensor<float> out, LocalTensor<float> in, LocalTensor<float> tmp, uint32_t count)
+__aicore__ inline void ComputeSigmoid(LocalTensor<float> out, LocalTensor<float> in, uint32_t count)
 {
 #if defined(ASCENDC_LAYER_NORM_FWD_USE_SIGMOID_API)
     Sigmoid(out, in, count);
-    PipeBarrier<PIPE_V>();
-#elif defined(ASCENDC_LAYER_NORM_FWD_USE_DIV_SIGMOID)
-    Neg(out, in, count);
-    PipeBarrier<PIPE_V>();
-    Exp(out, out, count);
-    PipeBarrier<PIPE_V>();
-    Adds(out, out, 1.0f, count);
-    PipeBarrier<PIPE_V>();
-    Muls(tmp, in, 0.0f, count);
-    PipeBarrier<PIPE_V>();
-    Adds(tmp, tmp, 1.0f, count);
-    PipeBarrier<PIPE_V>();
-    Div(out, tmp, out, count);
     PipeBarrier<PIPE_V>();
 #else
     Neg(out, in, count);
