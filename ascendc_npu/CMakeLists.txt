@@ -8,6 +8,7 @@ cc_library(
     pytorch_npu_helper.hpp
   SRCS
     gemma_rms_norm.cpp
+    layer_norm_fwd.cpp
   DEPS
     torch
     torch_npu

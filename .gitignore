@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 triton_npu/binary/
+npu_python_extension/build/
+*.so

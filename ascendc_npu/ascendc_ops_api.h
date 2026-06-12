@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <tuple>
 #include <vector>
 
 namespace npu_ops {
@@ -27,5 +28,15 @@ void npu_gemma_rms_norm(
     double epsilon,
     torch::Tensor &rstdOut,
     torch::Tensor &yOut);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> npu_layer_norm_fwd(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const c10::optional<torch::Tensor>& bias,
+    double eps,
+    const c10::optional<torch::Tensor>& z,
+    int64_t group_size,
+    bool norm_before_gate,
+    bool is_rms_norm);
 
 }  // namespace npu_ops
